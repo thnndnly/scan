@@ -1,0 +1,24 @@
+# Core dependencies (mirrors pyproject.toml)
+opencv-python>=4.9
+easyocr>=1.7
+imagehash>=4.3
+pillow>=10.0
+numpy>=1.26
+scipy>=1.12
+requests>=2.31
+tqdm>=4.66
+click>=8.1
+pydantic>=2.0
+pydantic-settings>=2.0
+rapidfuzz>=3.0
+pyyaml>=6.0
+
+# Optional extras – uncomment as needed
+# ultralytics>=8.0       # YOLO detection
+# openai>=1.0            # LLM recognition (GPT-4o)
+# gradio>=4.0            # Web UI
+
+# Development
+pytest>=7.0
+pytest-cov
+ruff

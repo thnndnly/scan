@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mtg-card-scanner"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+    "opencv-python>=4.9",
+    "easyocr>=1.7",
+    "imagehash>=4.3",
+    "pillow>=10.0",
+    "numpy>=1.26",
+    "scipy>=1.12",
+    "requests>=2.31",
+    "tqdm>=4.66",
+    "click>=8.1",
+    "pydantic>=2.0",
+    "pydantic-settings>=2.0",
+    "rapidfuzz>=3.0",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+yolo = ["ultralytics>=8.0"]
+llm = ["openai>=1.0"]
+ui = ["gradio>=4.0"]
+dev = ["pytest>=7.0", "pytest-cov", "ruff"]
+
+[project.scripts]
+mtg-scan = "mtg_scanner.cli:cli"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100

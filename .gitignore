@@ -1,0 +1,29 @@
+# Virtual environment
+.venv/
+
+# Data files (large / generated)
+data/*.db
+data/*.json
+data/models/
+data/training/
+# Archive DB is large; index JSON is git-trackable
+data/image_archive.db
+!data/image_archive_index.json
+data/card_catalog.db
+
+# Output
+output/*.csv
+output/*.json
+output/patches/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.ruff_cache/
+
+# Env
+.env

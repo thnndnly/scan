@@ -1,0 +1,50 @@
+detection:
+  method: opencv
+  yolo_model_path: data/models/yolo_mtg.pt
+  confidence_threshold: 0.5
+  aspect_ratio_min: 0.60
+  aspect_ratio_max: 0.85
+  min_card_area_px: 2000
+  save_debug: false
+
+recognition:
+  primary_method: ocr
+  fallback_method: hash
+  ocr_confidence_threshold: 0.70
+  hash_max_hamming_distance: 12
+  llm_fallback_enabled: false
+  ocr_languages:
+    - en
+    - de
+  ocr_languages_cjk:
+    - ja
+
+scryfall:
+  cache_ttl_hours: 24
+  rate_limit_ms: 110
+  cache_db_path: data/scryfall_cache.db
+
+output:
+  default_format: both
+  output_dir: ./output
+  save_card_patches: false
+  low_confidence_threshold: 0.60
+
+dataset:
+  enabled: true
+  db_path: data/dataset.db
+  save_patches: true
+
+archive:
+  enabled: true
+  db_path: data/image_archive.db
+  index_path: data/image_archive_index.json
+  max_dimension: 1920
+  jpeg_quality: 70
+  thumbnail_size: 300
+  thumbnail_quality: 50
+
+catalog:
+  enabled: true
+  db_path: data/card_catalog.db
+  bulk_type: default_cards
