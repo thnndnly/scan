@@ -73,7 +73,8 @@
       "Bash(.venv/Scripts/python -c \"\nfrom rapidfuzz import fuzz, process\nimport json\n\nwith open\\('data/card_names.json', encoding='utf-8'\\) as f:\n    names = json.load\\(f\\)\n\ntests = ['Ighentng Tole', 'Lighntng Tolr', 'Lighentng Golt', '1851', 'Air Eiemenial', 'Cnterspel']\nfor t in tests:\n    results = process.extract\\(t, names, scorer=fuzz.token_sort_ratio, limit=3\\)\n    print\\(f'{t!r}: {[\\(m, round\\(s\\)\\) for m,s,_ in results]}'\\)\n\" 2>&1)",
       "Bash(.venv/Scripts/python -c \"\nimport cv2, numpy as np, easyocr, warnings\nwarnings.filterwarnings\\('ignore'\\)\n\nreader = easyocr.Reader\\(['en', 'de'], verbose=False\\)\n\npatches = {\n    'Air Elemental':  'data/patches/2026-03-16/scan_32_patch_0.png',\n    'Counterspell':   'data/patches/2026-03-16/scan_32_patch_5.png',\n    'Lightning Bolt': 'data/patches/2026-03-16/scan_32_patch_12.png',\n}\n\ndef read_thresh\\(path, x_end=0.65, block=21, c=5\\):\n    img = cv2.imread\\(path\\)\n    h, w = img.shape[:2]\n    crop = img[0:int\\(h*0.13\\), int\\(w*0.01\\):int\\(w*x_end\\)]\n    gray = cv2.cvtColor\\(crop, cv2.COLOR_BGR2GRAY\\)\n    thresh = cv2.adaptiveThreshold\\(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,\n                                   cv2.THRESH_BINARY_INV, block, c\\)\n    bgr = cv2.cvtColor\\(thresh, cv2.COLOR_GRAY2BGR\\)\n    results = reader.readtext\\(bgr, detail=1\\)\n    return ' '.join\\(t for \\(_, t, _\\) in results if t\\)\n\nfor name, path in patches.items\\(\\):\n    print\\(f'--- {name} ---'\\)\n    for block in [15, 21, 31]:\n        r = read_thresh\\(path, block=block\\)\n        print\\(f'  block={block}: {repr\\(r\\)}'\\)\n\" 2>&1)",
       "Bash(.venv/Scripts/pytest tests/test_recognition.py -v 2>&1 | tail -20)",
-      "Bash(.venv/Scripts/pytest tests/ -v 2>&1 | tail -20)"
+      "Bash(.venv/Scripts/pytest tests/ -v 2>&1 | tail -20)",
+      "Bash(start:*)"
     ]
   }
 }

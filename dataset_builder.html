@@ -1,0 +1,1123 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MTG Dataset Builder v2</title>
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --bg-base:#0b0c14;--bg-panel:#0d0e18;--bg-header:#0f1019;
+  --border:#191b2e;--border-2:#1e2035;
+  --text:#dde0f0;--text-muted:#555875;--text-dim:#2d2f46;
+  --gold:#c9a84c;--green:#34d399;--red:#ef4444;
+}
+html,body{height:100%;background:var(--bg-base);color:var(--text);font-family:'Courier New',monospace;font-size:11px;overflow:hidden}
+
+#header{
+  position:fixed;top:0;left:0;right:0;height:40px;
+  background:var(--bg-header);border-bottom:1px solid var(--border);
+  display:flex;align-items:center;padding:0 12px;gap:12px;z-index:100;
+}
+#header .logo{display:flex;align-items:center;gap:6px;color:var(--gold);font-size:13px;font-weight:bold;letter-spacing:1px;margin-right:8px}
+#header .logo span{color:var(--text-muted);font-size:9px;letter-spacing:2px;text-transform:uppercase}
+#header .nav{display:flex;gap:4px}
+#header .nav button{
+  background:none;border:1px solid transparent;color:var(--text-muted);
+  padding:4px 10px;cursor:pointer;font-family:inherit;font-size:10px;
+  letter-spacing:1.5px;text-transform:uppercase;border-radius:2px;
+}
+#header .nav button.active{border-color:var(--gold);color:var(--gold)}
+#header .nav button:hover:not(.active){border-color:var(--border-2);color:var(--text)}
+#header .spacer{flex:1}
+#header .hactions{display:flex;gap:6px;align-items:center}
+#header .counter{color:var(--text-muted);font-size:9px;letter-spacing:1px;padding:0 8px}
+.hbtn{
+  background:none;border:1px solid var(--border-2);color:var(--text-muted);
+  padding:4px 9px;cursor:pointer;font-family:inherit;font-size:9px;
+  letter-spacing:1px;border-radius:2px;
+}
+.hbtn:hover{border-color:var(--gold);color:var(--gold)}
+
+#app{position:fixed;top:40px;left:0;right:0;bottom:0;overflow:hidden}
+.view{display:none;width:100%;height:100%}
+.view.active{display:flex}
+
+/* ANNOTATE */
+#view-annotate{flex-direction:row}
+#canvas-area{
+  flex:1;overflow:hidden;background:var(--bg-base);
+  display:flex;align-items:center;justify-content:center;
+}
+#drop-zone{
+  display:flex;flex-direction:column;align-items:center;justify-content:center;
+  width:calc(100% - 40px);height:calc(100vh - 80px);
+  border:2px dashed var(--border);border-radius:4px;
+  cursor:pointer;color:var(--text-muted);gap:12px;
+}
+#drop-zone:hover,#drop-zone.dragover{border-color:var(--gold);color:var(--gold)}
+#drop-zone .dz-icon{font-size:36px}
+#drop-zone .dz-text{font-size:12px;letter-spacing:2px;text-transform:uppercase}
+#drop-zone .dz-sub{font-size:9px;color:var(--text-dim)}
+#img-container{position:relative;display:inline-block;max-width:100%;cursor:crosshair}
+#img-container img{display:block;max-width:100%;max-height:calc(100vh - 40px);width:auto;height:auto;pointer-events:none;user-select:none}
+#svg-overlay{position:absolute;top:0;left:0;width:100%;height:100%;overflow:visible}
+
+#sidebar{
+  width:240px;min-width:240px;background:var(--bg-panel);
+  border-left:1px solid var(--border);display:flex;flex-direction:column;overflow:hidden;
+}
+#sidebar-top{padding:10px;border-bottom:1px solid var(--border);flex-shrink:0}
+#sidebar-top .session-label{display:flex;gap:6px;margin-bottom:8px;}
+#session-label-input{
+  flex:1;background:var(--bg-base);border:1px solid var(--border-2);
+  color:var(--text);padding:4px 6px;font-family:inherit;font-size:10px;border-radius:2px;outline:none;
+}
+#session-label-input:focus{border-color:var(--gold)}
+.sbtn{
+  background:none;border:1px solid var(--border-2);color:var(--text-muted);
+  padding:4px 8px;cursor:pointer;font-family:inherit;font-size:9px;
+  letter-spacing:1px;border-radius:2px;white-space:nowrap;
+}
+.sbtn:hover{border-color:var(--gold);color:var(--gold)}
+.sbtn.green{border-color:var(--green);color:var(--green)}
+.sbtn.green:hover{background:var(--green);color:#000}
+.sbtn.red{border-color:var(--red);color:var(--red)}
+.sbtn.red:hover{background:var(--red);color:#fff}
+#sidebar-actions{display:flex;gap:4px;flex-wrap:wrap}
+#sidebar-top .hint{color:var(--text-dim);font-size:8px;margin-top:6px;letter-spacing:1px}
+
+#crops-list{flex:1;overflow-y:auto;padding:8px}
+.crop-item{border:1px solid var(--border);border-radius:3px;margin-bottom:6px;cursor:pointer;overflow:hidden;transition:border-color .1s}
+.crop-item:hover{border-color:var(--border-2)}
+.crop-item.selected{border-color:var(--gold)}
+.crop-item.confirmed{border-color:var(--green)}
+.crop-item-header{display:flex;align-items:center;gap:6px;padding:6px 7px;background:var(--bg-base);}
+.crop-num{width:18px;height:18px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:8px;font-weight:bold;flex-shrink:0;color:#000;}
+.crop-name-display{flex:1;font-size:9px;color:var(--text-muted);overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+.crop-name-display.named{color:var(--text)}
+.crop-del{background:none;border:none;color:var(--text-dim);cursor:pointer;font-size:11px;padding:0 2px;line-height:1}
+.crop-del:hover{color:var(--red)}
+
+/* MODAL */
+#crop-modal{position:fixed;inset:0;z-index:500;display:flex;align-items:center;justify-content:center;}
+#modal-overlay{position:absolute;inset:0;background:rgba(0,0,0,.72);}
+#modal-dialog{
+  position:relative;z-index:1;background:var(--bg-panel);
+  border:1px solid var(--border-2);border-radius:4px;
+  width:380px;max-width:calc(100vw - 40px);
+  display:flex;flex-direction:column;overflow:hidden;
+  box-shadow:0 12px 48px rgba(0,0,0,.7);
+  animation:modalIn .15s ease;
+}
+@keyframes modalIn{from{opacity:0;transform:scale(.96)}to{opacity:1;transform:scale(1)}}
+#modal-header{
+  display:flex;align-items:center;justify-content:space-between;
+  padding:10px 12px;border-bottom:1px solid var(--border);flex-shrink:0;
+}
+#modal-title{color:var(--gold);font-size:11px;letter-spacing:1.5px;text-transform:uppercase}
+#modal-close{background:none;border:none;color:var(--text-muted);cursor:pointer;font-size:14px;line-height:1;padding:2px 4px;}
+#modal-close:hover{color:var(--text)}
+#modal-preview{background:var(--bg-base);overflow:hidden;position:relative;max-height:220px;border-bottom:1px solid var(--border);}
+#modal-preview img{display:block;pointer-events:none}
+#modal-preview .no-img{color:var(--text-dim);font-size:9px;letter-spacing:1.5px;text-transform:uppercase;padding:24px;text-align:center}
+#modal-body{padding:12px;flex-shrink:0}
+#modal-name-wrap{position:relative}
+#modal-name-input{
+  width:100%;background:var(--bg-base);border:1px solid var(--border-2);
+  color:var(--text);padding:7px 10px;font-family:inherit;font-size:12px;border-radius:2px;outline:none;
+}
+#modal-name-input:focus{border-color:var(--gold)}
+#modal-ac-list{
+  position:absolute;top:100%;left:0;right:0;
+  background:#13141f;border:1px solid var(--border-2);z-index:10;max-height:220px;overflow-y:auto;
+}
+.ac-item{padding:6px 10px;cursor:pointer;font-size:10px;color:var(--text-muted);}
+.ac-item:hover,.ac-item.active{background:var(--border);color:var(--text)}
+#modal-footer{
+  display:flex;gap:8px;padding:10px 12px;border-top:1px solid var(--border);
+  background:var(--bg-base);flex-shrink:0;
+}
+#modal-footer button{flex:1;padding:7px;font-size:10px;letter-spacing:1px}
+
+/* SESSIONS */
+#view-sessions{flex-direction:column;overflow-y:auto;padding:20px}
+#view-sessions h2{color:var(--gold);font-size:12px;letter-spacing:3px;text-transform:uppercase;margin-bottom:16px}
+#sessions-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:12px;}
+.sess-card{background:var(--bg-panel);border:1px solid var(--border);border-radius:3px;padding:10px;display:flex;flex-direction:column;gap:6px;}
+.sess-card:hover{border-color:var(--border-2)}
+.sess-label{color:var(--gold);font-size:11px;font-weight:bold;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+.sess-meta{color:var(--text-muted);font-size:9px;letter-spacing:1px}
+.sess-img-badge{
+  font-size:8px;padding:2px 5px;border-radius:2px;display:inline-block;margin-top:2px;
+}
+.sess-img-badge.has-img{background:#1a2a1a;color:var(--green);border:1px solid #2a4a2a}
+.sess-img-badge.no-img{background:#2a1a1a;color:#ef9999;border:1px solid #4a2a2a}
+.sess-progress{height:3px;background:var(--border);border-radius:2px;overflow:hidden;margin:2px 0}
+.sess-progress-fill{height:100%;background:var(--green);}
+.sess-file{color:var(--text-dim);font-size:8px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+.sess-actions{display:flex;gap:4px;margin-top:4px;flex-wrap:wrap}
+.sess-actions button{flex:1;padding:4px;font-size:8px;min-width:0}
+.empty-state{color:var(--text-dim);font-size:10px;letter-spacing:2px;text-transform:uppercase;padding:40px;text-align:center}
+
+/* STATS */
+#view-stats{flex-direction:column;overflow-y:auto;padding:20px}
+#view-stats h2{color:var(--gold);font-size:12px;letter-spacing:3px;text-transform:uppercase;margin-bottom:16px}
+.stats-grid{display:grid;grid-template-columns:repeat(5,1fr);gap:10px;margin-bottom:24px}
+.stat-card{background:var(--bg-panel);border:1px solid var(--border);border-radius:3px;padding:12px;text-align:center}
+.stat-val{font-size:22px;color:var(--gold);margin-bottom:4px}
+.stat-lbl{color:var(--text-muted);font-size:8px;letter-spacing:2px;text-transform:uppercase}
+.section-title{color:var(--text-muted);font-size:9px;letter-spacing:2.5px;text-transform:uppercase;margin-bottom:10px}
+.chart-wrap{background:var(--bg-panel);border:1px solid var(--border);border-radius:3px;padding:16px;margin-bottom:24px}
+.bar-chart{display:flex;align-items:flex-end;gap:3px;height:80px}
+.bar-col{display:flex;flex-direction:column;align-items:center;gap:4px;flex:1}
+.bar{background:var(--gold);border-radius:2px 2px 0 0;min-height:2px;width:100%;opacity:.7;}
+.bar:hover{opacity:1}
+.bar-lbl{color:var(--text-dim);font-size:7px;writing-mode:vertical-lr;transform:rotate(180deg);white-space:nowrap}
+.gauge-wrap{background:var(--bg-panel);border:1px solid var(--border);border-radius:3px;padding:16px}
+.gauge-bar-outer{height:12px;background:var(--border);border-radius:6px;overflow:hidden;margin:8px 0}
+.gauge-bar-inner{height:100%;border-radius:6px;transition:width .5s,background .3s}
+.gauge-meta{display:flex;justify-content:space-between;color:var(--text-muted);font-size:9px}
+
+/* TOAST */
+#toast-container{position:fixed;top:48px;right:12px;z-index:9999;display:flex;flex-direction:column;gap:6px}
+.toast{
+  background:var(--bg-panel);border:1px solid var(--green);color:var(--text);
+  padding:8px 14px;border-radius:3px;font-size:10px;
+  animation:toastIn .2s ease;pointer-events:none;letter-spacing:.5px;
+}
+.toast.err{border-color:var(--red)}
+@keyframes toastIn{from{opacity:0;transform:translateX(20px)}to{opacity:1;transform:translateX(0)}}
+
+::-webkit-scrollbar{width:5px;height:5px}
+::-webkit-scrollbar-track{background:var(--bg-base)}
+::-webkit-scrollbar-thumb{background:var(--border-2);border-radius:3px}
+input[type=file]{display:none}
+</style>
+</head>
+<body>
+
+<script>
+// ── STORAGE SHIM ──────────────────────────────────────────────────────────────
+if (!window.storage) {
+  window.storage = {
+    get: async (k) => { const v = localStorage.getItem(k); return v ? {key:k,value:v} : null; },
+    set: async (k, v) => { localStorage.setItem(k, v); return {key:k,value:v}; }
+  };
+}
+
+// ── INDEXEDDB FOR IMAGES ──────────────────────────────────────────────────────
+// Sessions (coords + names) → localStorage (small)
+// Images (dataURL)          → IndexedDB    (can be 100+ MB)
+let imgDB = null;
+
+function openImageDB() {
+  return new Promise((res, rej) => {
+    if (imgDB) { res(imgDB); return; }
+    const req = indexedDB.open('mtg_ds_images', 1);
+    req.onupgradeneeded = e => e.target.result.createObjectStore('images', {keyPath:'sid'});
+    req.onsuccess = e => { imgDB = e.target.result; res(imgDB); };
+    req.onerror   = () => rej(req.error);
+  });
+}
+
+async function saveImageToDB(sid, dataURL) {
+  const db = await openImageDB();
+  return new Promise((res, rej) => {
+    const tx = db.transaction('images', 'readwrite');
+    tx.objectStore('images').put({sid, dataURL});
+    tx.oncomplete = res; tx.onerror = () => rej(tx.error);
+  });
+}
+
+async function loadImageFromDB(sid) {
+  const db = await openImageDB();
+  return new Promise((res) => {
+    const req = db.transaction('images').objectStore('images').get(sid);
+    req.onsuccess = () => res(req.result ? req.result.dataURL : null);
+    req.onerror   = () => res(null);
+  });
+}
+
+async function deleteImageFromDB(sid) {
+  const db = await openImageDB();
+  return new Promise((res) => {
+    const tx = db.transaction('images', 'readwrite');
+    tx.objectStore('images').delete(sid);
+    tx.oncomplete = res; tx.onerror = res;
+  });
+}
+</script>
+
+<div id="header">
+  <div class="logo">⬡ MTG <span>Dataset Builder v2</span></div>
+  <nav class="nav">
+    <button id="nav-annotate" class="active" onclick="setView('annotate')">Annotieren</button>
+    <button id="nav-sessions" onclick="setView('sessions')">Sessions (<span id="sess-count">0</span>)</button>
+    <button id="nav-stats" onclick="setView('stats')">Statistik</button>
+  </nav>
+  <div class="spacer"></div>
+  <span class="counter" id="hdr-counter"></span>
+  <div class="hactions">
+    <button class="hbtn" onclick="exportAllCSV()">⬇ CSV gesamt</button>
+    <button class="hbtn" onclick="exportAllJSON()">⬇ JSON gesamt</button>
+  </div>
+</div>
+
+<div id="app">
+  <!-- ANNOTATE -->
+  <div id="view-annotate" class="view active">
+    <div id="canvas-area">
+      <div id="drop-zone" onclick="triggerFileInput()">
+        <div class="dz-icon">⬡</div>
+        <div class="dz-text">Bild hierher ziehen</div>
+        <div class="dz-sub">JPG · PNG · WEBP · AVIF · GIF — oder klicken</div>
+      </div>
+      <div id="img-container" style="display:none">
+        <img id="main-img" alt="">
+        <svg id="svg-overlay" viewBox="0 0 100 100" preserveAspectRatio="none"
+             onmousedown="svgMouseDown(event)"
+             onmousemove="svgMouseMove(event)"
+             onmouseup="svgMouseUp(event)"></svg>
+      </div>
+    </div>
+    <aside id="sidebar">
+      <div id="sidebar-top">
+        <div class="session-label">
+          <input id="session-label-input" placeholder="Session-Bezeichnung…" oninput="state.label=this.value">
+        </div>
+        <div id="sidebar-actions">
+          <button class="sbtn green" onclick="saveSession()">💾 Speichern</button>
+          <button class="sbtn" onclick="exportSessionJSON()">⬇ JSON</button>
+          <button class="sbtn" onclick="exportSessionYOLO()">⬇ YOLO</button>
+          <button class="sbtn" style="border-color:#60a5fa;color:#60a5fa" onclick="exportTrainingPack()">⬇ Training</button>
+          <button class="sbtn" onclick="loadNewImage()">↻ Bild</button>
+          <button class="sbtn red" onclick="clearSession()">✕ Neu</button>
+        </div>
+        <div class="hint" id="sidebar-hint"></div>
+      </div>
+      <div id="crops-list"></div>
+    </aside>
+  </div>
+
+  <!-- SESSIONS -->
+  <div id="view-sessions" class="view">
+    <h2>Gespeicherte Sessions</h2>
+    <div id="sessions-grid"></div>
+  </div>
+
+  <!-- STATS -->
+  <div id="view-stats" class="view">
+    <h2>Statistik</h2>
+    <div class="stats-grid" id="stats-grid"></div>
+    <div class="section-title">Aktivität (letzte 14 Tage)</div>
+    <div class="chart-wrap"><div class="bar-chart" id="bar-chart"></div></div>
+    <div class="section-title">Vollständigkeit</div>
+    <div class="gauge-wrap" id="gauge-wrap"></div>
+  </div>
+</div>
+
+<div id="toast-container"></div>
+<input type="file" id="file-input" accept="image/*" onchange="handleFileInput(event)">
+
+<!-- CROP NAMING MODAL -->
+<div id="crop-modal" style="display:none">
+  <div id="modal-overlay" onclick="closeModal()"></div>
+  <div id="modal-dialog">
+    <div id="modal-header">
+      <span id="modal-title">Karte benennen</span>
+      <button id="modal-close" onclick="closeModal()">✕</button>
+    </div>
+    <div id="modal-preview"></div>
+    <div id="modal-body">
+      <div id="modal-name-wrap">
+        <input id="modal-name-input" type="text" placeholder="Kartenname eingeben…"
+               autocomplete="off"
+               oninput="modalAcSearch(this.value)"
+               onkeydown="modalKeyDown(event)">
+        <div id="modal-ac-list" style="display:none"></div>
+      </div>
+    </div>
+    <div id="modal-footer">
+      <button class="sbtn" onclick="closeModal()">Abbrechen</button>
+      <button class="sbtn green" onclick="modalConfirm()">✓ Bestätigen</button>
+    </div>
+  </div>
+</div>
+
+<script>
+// ── PALETTE ───────────────────────────────────────────────────────────────────
+const PAL = ["#f59e0b","#ef4444","#34d399","#60a5fa","#a78bfa",
+             "#f472b6","#fb923c","#38bdf8","#e879f9","#84cc16"];
+
+// ── STATE ─────────────────────────────────────────────────────────────────────
+const state = {
+  sessions: [],
+  crops: [],
+  selectedId: null,
+  label: '',
+  imageName: '',
+  imageDataURL: null,   // current working image (not persisted in localStorage)
+  currentSessionId: null, // if loaded from saved session
+  dragging: false,
+  dragStart: null,
+  currentDragRect: null,
+  view: 'annotate',
+};
+
+// ── UTILS ─────────────────────────────────────────────────────────────────────
+function uid() { return Math.random().toString(36).slice(2,9); }
+function colOf(i) { return PAL[i % PAL.length]; }
+function escHtml(s) {
+  return (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+function toast(msg, err=false) {
+  const el = document.createElement('div');
+  el.className = 'toast'+(err?' err':'');
+  el.textContent = msg;
+  document.getElementById('toast-container').appendChild(el);
+  setTimeout(() => el.remove(), 2200);
+}
+
+function triggerFileInput() { document.getElementById('file-input').click(); }
+function loadNewImage()     { triggerFileInput(); }
+
+// ── FILE HANDLING ─────────────────────────────────────────────────────────────
+function handleFileInput(e) {
+  const f = e.target.files[0];
+  if (f) loadImageFile(f);
+  e.target.value = '';
+}
+
+function loadImageFile(file) {
+  const reader = new FileReader();
+  reader.onload = ev => {
+    state.imageDataURL = ev.target.result;
+    state.imageName = file.name;
+    if (!state.label || state.label === state.imageName.replace(/\.[^.]+$/,'')) {
+      state.label = file.name.replace(/\.[^.]+$/, '');
+      document.getElementById('session-label-input').value = state.label;
+    }
+    showImage(ev.target.result);
+    document.getElementById('sidebar-hint').textContent = '⚠ Gespeichert erst nach "Speichern"';
+    toast('Bild geladen: ' + file.name);
+  };
+  reader.readAsDataURL(file);
+}
+
+function showImage(src) {
+  document.getElementById('main-img').src = src;
+  document.getElementById('drop-zone').style.display = 'none';
+  document.getElementById('img-container').style.display = 'block';
+  updateHeader();
+}
+
+// ── DRAG & DROP ───────────────────────────────────────────────────────────────
+const dzEl = document.getElementById('drop-zone');
+dzEl.addEventListener('dragover', e => { e.preventDefault(); dzEl.classList.add('dragover'); });
+dzEl.addEventListener('dragleave', () => dzEl.classList.remove('dragover'));
+dzEl.addEventListener('drop', e => {
+  e.preventDefault(); dzEl.classList.remove('dragover');
+  const f = e.dataTransfer.files[0];
+  if (f && f.type.startsWith('image/')) loadImageFile(f);
+});
+document.getElementById('canvas-area').addEventListener('dragover', e => e.preventDefault());
+document.getElementById('canvas-area').addEventListener('drop', e => {
+  e.preventDefault();
+  const f = e.dataTransfer.files[0];
+  if (f && f.type.startsWith('image/')) loadImageFile(f);
+});
+
+// ── SVG COORDS ────────────────────────────────────────────────────────────────
+const svgEl = document.getElementById('svg-overlay');
+
+function svgXY(e) {
+  const p = svgEl.createSVGPoint();
+  p.x = e.clientX; p.y = e.clientY;
+  const t = p.matrixTransform(svgEl.getScreenCTM().inverse());
+  return { x: Math.max(0,Math.min(100,t.x)), y: Math.max(0,Math.min(100,t.y)) };
+}
+
+// ── SVG RENDER ────────────────────────────────────────────────────────────────
+function renderSVG() {
+  const parts = [];
+  state.crops.forEach((c, i) => {
+    const col = colOf(i);
+    const sel = c.id === state.selectedId;
+    const x = c.x*100, y = c.y*100, w = c.w*100, h = c.h*100;
+    const dash = c.ok ? '' : 'stroke-dasharray="3 2"';
+    const fillOp = sel ? 0.12 : 0.05;
+    parts.push(`<rect x="${x}" y="${y}" width="${w}" height="${h}"
+      fill="${col}" fill-opacity="${fillOp}"
+      stroke="${col}" stroke-width="${sel?2:1.5}" ${dash}
+      data-id="${c.id}" onclick="openModal('${c.id}')" style="cursor:pointer"/>`);
+    parts.push(`<rect x="${x+0.3}" y="${y+0.3}" width="5.5" height="4" rx="0.5" fill="${col}" opacity="0.9"/>`);
+    parts.push(`<text x="${x+0.8}" y="${y+3.3}" font-size="2.8" fill="#000" font-family="monospace" font-weight="bold">#${i+1}</text>`);
+  });
+  if (state.dragging && state.currentDragRect) {
+    const r = state.currentDragRect;
+    parts.push(`<rect x="${r.x}" y="${r.y}" width="${r.w}" height="${r.h}"
+      fill="none" stroke="var(--gold)" stroke-width="1" stroke-dasharray="4 2"/>`);
+  }
+  svgEl.innerHTML = parts.join('');
+}
+
+// ── SVG MOUSE ─────────────────────────────────────────────────────────────────
+function svgMouseDown(e) {
+  if (e.button !== 0) return;
+  if (e.target !== svgEl && e.target.tagName !== 'svg') return;
+  e.preventDefault();
+  state.dragging = true;
+  state.dragStart = svgXY(e);
+  state.currentDragRect = {x:state.dragStart.x,y:state.dragStart.y,w:0,h:0};
+}
+function svgMouseMove(e) {
+  if (!state.dragging) return;
+  const cur = svgXY(e);
+  state.currentDragRect = {
+    x:Math.min(cur.x,state.dragStart.x), y:Math.min(cur.y,state.dragStart.y),
+    w:Math.abs(cur.x-state.dragStart.x), h:Math.abs(cur.y-state.dragStart.y)
+  };
+  renderSVG();
+}
+function svgMouseUp(e) {
+  if (!state.dragging) return;
+  state.dragging = false;
+  const r = state.currentDragRect;
+  state.currentDragRect = null;
+  if (r && r.w > 0.5 && r.h > 0.5) {
+    const crop = {id:uid(), x:r.x/100, y:r.y/100, w:r.w/100, h:r.h/100, name:'', ok:false};
+    state.crops.push(crop);
+    state.selectedId = crop.id;
+    renderSVG(); updateSidebar(); updateHeader();
+    setTimeout(() => openModal(crop.id), 30);
+  }
+  renderSVG();
+}
+
+// ── CROP OPS ──────────────────────────────────────────────────────────────────
+function selectCrop(id) {
+  state.selectedId = id;
+  renderSVG(); updateSidebar();
+  const el = document.querySelector(`.crop-item[data-id="${id}"]`);
+  if (el) el.scrollIntoView({block:'nearest'});
+}
+
+function deleteCrop(id) {
+  closeModal();
+  state.crops = state.crops.filter(c => c.id !== id);
+  if (state.selectedId === id)
+    state.selectedId = state.crops.length ? state.crops[state.crops.length-1].id : null;
+  renderSVG(); updateSidebar(); updateHeader();
+}
+
+function nextUnnamed(fromId) {
+  const idx = state.crops.findIndex(c => c.id === fromId);
+  for (let i=idx+1; i<state.crops.length; i++)
+    if (!state.crops[i].name) return state.crops[i].id;
+  for (let i=0; i<idx; i++)
+    if (!state.crops[i].name) return state.crops[i].id;
+  return null;
+}
+
+// ── SIDEBAR (einfache Liste, kein Inline-Edit) ────────────────────────────────
+function updateSidebar() {
+  const list = document.getElementById('crops-list');
+  if (!state.crops.length) {
+    list.innerHTML = '<div style="color:var(--text-dim);font-size:9px;letter-spacing:1.5px;text-transform:uppercase;padding:20px;text-align:center">Karten markieren…</div>';
+    return;
+  }
+  list.innerHTML = state.crops.map((c, i) => {
+    const col = colOf(i);
+    const sel = c.id === state.selectedId;
+    return `<div class="crop-item ${sel?'selected':''} ${c.ok?'confirmed':''}" data-id="${c.id}"
+        onclick="openModal('${c.id}')">
+      <div class="crop-item-header">
+        <div class="crop-num" style="background:${col}">${i+1}</div>
+        <div class="crop-name-display ${c.name?'named':''}">${c.name||'— unbenannt —'}</div>
+        <button class="crop-del" onclick="event.stopPropagation();deleteCrop('${c.id}')" title="Löschen">✕</button>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+// ── MODAL ─────────────────────────────────────────────────────────────────────
+let acTimer=null, acData=[], acIndex=-1;
+let modalCropId = null;
+
+function openModal(id) {
+  const c = state.crops.find(x=>x.id===id);
+  if (!c) return;
+  modalCropId = id;
+  state.selectedId = id;
+  renderSVG(); updateSidebar();
+
+  const idx = state.crops.indexOf(c);
+  document.getElementById('modal-title').textContent = `Karte #${idx+1} benennen`;
+
+  // Crop preview
+  const prev = document.getElementById('modal-preview');
+  if (state.imageDataURL) {
+    const img = document.getElementById('main-img');
+    const iw = img.naturalWidth||1, ih = img.naturalHeight||1;
+    const cropAspect = (c.h*ih)/(c.w*iw);
+    const pvW = 356; // dialog width minus padding
+    const pvH = Math.min(220, pvW*cropAspect);
+    const imgPct = (1/c.w)*100;
+    const mlPct  = -(c.x/c.w)*100;
+    const mtPct  = -(c.y/c.w)*(ih/iw)*100;
+    prev.innerHTML = `<div style="width:${pvW}px;height:${pvH}px;overflow:hidden;margin:0 auto;">
+      <img src="${state.imageDataURL}"
+        style="width:${imgPct}%;margin-left:${mlPct}%;margin-top:${mtPct}%;display:block;max-width:none;pointer-events:none" alt="">
+    </div>`;
+  } else {
+    prev.innerHTML = '<div class="no-img">Kein Bild geladen</div>';
+  }
+
+  // Pre-fill name
+  const inp = document.getElementById('modal-name-input');
+  inp.value = c.name || '';
+  acData=[]; acIndex=-1;
+  document.getElementById('modal-ac-list').style.display='none';
+
+  document.getElementById('crop-modal').style.display='flex';
+  setTimeout(()=>{ inp.focus(); inp.select(); }, 50);
+}
+
+function closeModal() {
+  document.getElementById('crop-modal').style.display='none';
+  modalCropId = null;
+  acData=[]; acIndex=-1;
+  document.getElementById('modal-ac-list').style.display='none';
+}
+
+function modalConfirm() {
+  if (!modalCropId) return;
+  const c = state.crops.find(x=>x.id===modalCropId);
+  const val = document.getElementById('modal-name-input').value.trim();
+  if (!val){ toast('Zuerst Namen eingeben',true); return; }
+  if (c){ c.name=val; c.ok=true; }
+  const fromId = modalCropId;
+  closeModal();
+  renderSVG(); updateSidebar(); updateHeader();
+  // Auto-advance: open next unnamed crop
+  const nextId = nextUnnamed(fromId);
+  if (nextId) setTimeout(()=>openModal(nextId), 80);
+}
+
+// ── MODAL AUTOCOMPLETE ────────────────────────────────────────────────────────
+function modalAcSearch(term) {
+  clearTimeout(acTimer);
+  acData=[]; acIndex=-1;
+  if (term.length<2){ document.getElementById('modal-ac-list').style.display='none'; return; }
+  acTimer = setTimeout(async ()=>{
+    try {
+      const r = await fetch(`https://api.scryfall.com/cards/autocomplete?q=${encodeURIComponent(term)}`);
+      const d = await r.json();
+      acData=(d.data||[]).slice(0,8); acIndex=-1; modalAcRender();
+    } catch {}
+  }, 300);
+}
+
+function modalAcRender() {
+  const el = document.getElementById('modal-ac-list');
+  if (!acData.length){ el.style.display='none'; return; }
+  el.style.display='block';
+  el.innerHTML = acData.map((n,i)=>
+    `<div class="ac-item ${i===acIndex?'active':''}" onmousedown="modalAcApply('${escHtml(n)}')">${escHtml(n)}</div>`
+  ).join('');
+}
+
+function modalAcApply(name) {
+  document.getElementById('modal-name-input').value = name;
+  acData=[]; acIndex=-1;
+  document.getElementById('modal-ac-list').style.display='none';
+  modalConfirm();
+}
+
+function modalKeyDown(e) {
+  if (e.key==='ArrowDown'){ e.preventDefault(); acIndex=Math.min(acIndex+1,acData.length-1); modalAcRender(); return; }
+  if (e.key==='ArrowUp')  { e.preventDefault(); acIndex=Math.max(acIndex-1,-1); modalAcRender(); return; }
+  if (e.key==='Enter'){
+    e.preventDefault();
+    if (acIndex>=0 && acData[acIndex]) modalAcApply(acData[acIndex]);
+    else modalConfirm();
+    return;
+  }
+  if (e.key==='Escape'){ e.preventDefault(); closeModal(); return; }
+}
+
+// ── KEYBOARD (global, außerhalb Modal) ───────────────────────────────────────
+document.addEventListener('keydown', e => {
+  if (state.view !== 'annotate') return;
+  if (document.getElementById('crop-modal').style.display !== 'none') return; // modal handles its own keys
+  const idx = state.crops.findIndex(c=>c.id===state.selectedId);
+  if (e.key==='Delete'||e.key==='Backspace'){ if (state.selectedId){ e.preventDefault(); deleteCrop(state.selectedId); } }
+  if (e.key==='Escape'){ state.selectedId=null; renderSVG(); updateSidebar(); }
+  if (e.key==='Enter'){ if (state.selectedId){ e.preventDefault(); openModal(state.selectedId); } }
+  if (e.key==='ArrowRight'||e.key==='Tab'){ e.preventDefault(); if (!state.crops.length) return; selectCrop(state.crops[(idx+1)%state.crops.length].id); }
+  if (e.key==='ArrowLeft'){ if (!state.crops.length) return; selectCrop(state.crops[(idx-1+state.crops.length)%state.crops.length].id); }
+});
+
+// ── HEADER ────────────────────────────────────────────────────────────────────
+function updateHeader() {
+  const total = state.crops.length, named = state.crops.filter(c=>c.name).length;
+  document.getElementById('hdr-counter').textContent = total ? `${total} Ausschn. · ${named} benannt` : '';
+  document.getElementById('sess-count').textContent = state.sessions.length;
+}
+
+// ── PERSISTENCE ───────────────────────────────────────────────────────────────
+const STORE_KEY = 'mtg_ds_v2';
+
+async function persistMeta() {
+  // Store only metadata (no image) in localStorage
+  await window.storage.set(STORE_KEY, JSON.stringify(state.sessions));
+  document.getElementById('sess-count').textContent = state.sessions.length;
+}
+
+async function loadSessions() {
+  try {
+    const r = await window.storage.get(STORE_KEY);
+    if (r && r.value) {
+      state.sessions = JSON.parse(r.value);
+      if (!Array.isArray(state.sessions)) state.sessions = [];
+    }
+  } catch { state.sessions = []; }
+  updateHeader();
+}
+
+async function saveSession() {
+  if (!state.crops.length) { toast('Keine Ausschnitte zum Speichern', true); return; }
+  if (!state.imageDataURL)  { toast('Erst Bild laden!', true); return; }
+
+  const sid = state.currentSessionId || uid();
+  state.currentSessionId = sid;
+
+  const sess = {
+    id: sid,
+    label: state.label || state.imageName || 'Session',
+    imageName: state.imageName,
+    date: new Date().toISOString(),
+    crops: JSON.parse(JSON.stringify(state.crops)),
+    hasImage: true,
+  };
+
+  // Save image to IndexedDB
+  try {
+    await saveImageToDB(sid, state.imageDataURL);
+  } catch(err) {
+    toast('Bild konnte nicht gespeichert werden: ' + err.message, true);
+    return;
+  }
+
+  // Save metadata to localStorage
+  const existing = state.sessions.findIndex(s => s.id === sid);
+  if (existing >= 0) state.sessions[existing] = sess;
+  else state.sessions.unshift(sess);
+  if (state.sessions.length > 500) state.sessions = state.sessions.slice(0, 500);
+
+  await persistMeta();
+  document.getElementById('sidebar-hint').textContent = '✓ Gespeichert inkl. Bild';
+  toast('Session gespeichert ✓ (inkl. Bild)');
+  updateHeader();
+}
+
+function clearSession() {
+  if (!confirm('Aktuelle Session leeren?')) return;
+  state.crops=[]; state.selectedId=null; state.label=''; state.imageName='';
+  state.imageDataURL=null; state.currentSessionId=null;
+  document.getElementById('session-label-input').value='';
+  document.getElementById('drop-zone').style.display='';
+  document.getElementById('img-container').style.display='none';
+  document.getElementById('main-img').src='';
+  document.getElementById('sidebar-hint').textContent='';
+  renderSVG(); updateSidebar(); updateHeader();
+}
+
+async function loadSessionData(sess) {
+  state.crops = JSON.parse(JSON.stringify(sess.crops));
+  state.selectedId = null;
+  state.label = sess.label;
+  state.imageName = sess.imageName;
+  state.currentSessionId = sess.id;
+  document.getElementById('session-label-input').value = sess.label;
+
+  // Try loading image from IndexedDB
+  const img = await loadImageFromDB(sess.id);
+  if (img) {
+    state.imageDataURL = img;
+    showImage(img);
+    document.getElementById('sidebar-hint').textContent = '✓ Bild aus Speicher geladen';
+  } else {
+    state.imageDataURL = null;
+    document.getElementById('drop-zone').style.display = '';
+    document.getElementById('img-container').style.display = 'none';
+    document.getElementById('sidebar-hint').textContent = '⚠ Bild neu hochladen';
+  }
+
+  renderSVG(); updateSidebar(); updateHeader();
+  setView('annotate');
+  toast(`"${sess.label}" geladen`);
+}
+
+// ── VIEW ──────────────────────────────────────────────────────────────────────
+function setView(v) {
+  state.view = v;
+  document.querySelectorAll('.view').forEach(el=>el.classList.remove('active'));
+  document.getElementById(`view-${v}`).classList.add('active');
+  document.querySelectorAll('.nav button').forEach(b=>b.classList.remove('active'));
+  document.getElementById(`nav-${v}`).classList.add('active');
+  if (v==='sessions') renderSessions();
+  if (v==='stats') renderStats();
+}
+
+// ── SESSIONS VIEW ──────────────────────────────────────────────────────────────
+function renderSessions() {
+  const grid = document.getElementById('sessions-grid');
+  if (!state.sessions.length) {
+    grid.innerHTML = '<div class="empty-state">Noch keine Sessions gespeichert</div>';
+    return;
+  }
+  grid.innerHTML = state.sessions.map(s => {
+    const total=s.crops.length, named=s.crops.filter(c=>c.name).length;
+    const pct = total ? Math.round(named/total*100) : 0;
+    const date = new Date(s.date).toLocaleDateString('de-DE');
+    const imgBadge = s.hasImage
+      ? '<span class="sess-img-badge has-img">✓ Bild gespeichert</span>'
+      : '<span class="sess-img-badge no-img">✗ Kein Bild</span>';
+    return `<div class="sess-card">
+      <div class="sess-label" title="${escHtml(s.label)}">${escHtml(s.label)}</div>
+      <div class="sess-meta">${date} · ${total} Ausschn.</div>
+      <div class="sess-progress"><div class="sess-progress-fill" style="width:${pct}%"></div></div>
+      <div class="sess-meta">${named}/${total} benannt (${pct}%)</div>
+      ${imgBadge}
+      <div class="sess-file" title="${escHtml(s.imageName)}">${escHtml(s.imageName)}</div>
+      <div class="sess-actions">
+        <button class="sbtn" onclick="loadSessionData(state.sessions.find(x=>x.id==='${s.id}'))">Laden</button>
+        <button class="sbtn" onclick="exportSessJSON('${s.id}')">JSON</button>
+        <button class="sbtn" style="border-color:#60a5fa;color:#60a5fa" onclick="exportSessTraining('${s.id}')">Training</button>
+        <button class="sbtn red" onclick="deleteSess('${s.id}')">✕</button>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+async function deleteSess(id) {
+  if (!confirm('Session löschen?')) return;
+  await deleteImageFromDB(id);
+  state.sessions = state.sessions.filter(s=>s.id!==id);
+  await persistMeta();
+  renderSessions(); updateHeader();
+  toast('Session gelöscht');
+}
+
+// ── STATS VIEW ────────────────────────────────────────────────────────────────
+function calcStats() {
+  const all = state.sessions;
+  const total = all.reduce((s,ss)=>s+ss.crops.length,0);
+  const named = all.reduce((s,ss)=>s+ss.crops.filter(c=>c.name).length,0);
+  const uniq = new Set(all.flatMap(ss=>ss.crops.map(c=>c.name).filter(Boolean))).size;
+  const perDay = {};
+  all.forEach(ss=>{ const d=ss.date.slice(0,10); perDay[d]=(perDay[d]||0)+ss.crops.length; });
+  return { total, named, unnamed:total-named, uniq, sessions:all.length, perDay };
+}
+
+function renderStats() {
+  const st = calcStats();
+  document.getElementById('stats-grid').innerHTML = [
+    ['Sessions',st.sessions],['Ausschnitte',st.total],
+    ['Benannt',st.named],['Unbenannt',st.unnamed],['Unique Karten',st.uniq]
+  ].map(([l,v])=>`<div class="stat-card"><div class="stat-val">${v}</div><div class="stat-lbl">${l}</div></div>`).join('');
+
+  const today = new Date();
+  const days = [];
+  for (let i=13;i>=0;i--) {
+    const d=new Date(today); d.setDate(d.getDate()-i);
+    const key=d.toISOString().slice(0,10);
+    days.push({key, lbl:d.toLocaleDateString('de-DE',{day:'2-digit',month:'2-digit'}), val:st.perDay[key]||0});
+  }
+  const maxVal = Math.max(...days.map(d=>d.val),1);
+  document.getElementById('bar-chart').innerHTML = days.map(d=>
+    `<div class="bar-col"><div class="bar" style="height:${Math.round(d.val/maxVal*100)}%" title="${d.val}"></div><div class="bar-lbl">${d.lbl}</div></div>`
+  ).join('');
+
+  const pct = st.total ? Math.round(st.named/st.total*100) : 0;
+  const col = pct>=95?'var(--green)':'var(--gold)';
+  document.getElementById('gauge-wrap').innerHTML = `
+    <div class="section-title" style="margin-bottom:4px">Bestätigte Ausschnitte</div>
+    <div class="gauge-bar-outer"><div class="gauge-bar-inner" style="width:${pct}%;background:${col}"></div></div>
+    <div class="gauge-meta"><span>${st.named} von ${st.total} benannt</span><span style="color:${col}">${pct}%</span></div>`;
+}
+
+// ── ZIP BUILDER (keine externen Abhängigkeiten) ───────────────────────────────
+// Bilder werden als Rohbytes gespeichert (Store-Methode, da JPEG/PNG schon komprimiert).
+// Textdateien (JSON, TXT) werden mit deflate-raw komprimiert (CompressionStream API).
+
+const _crc32tbl = (() => {
+  const t = new Uint32Array(256);
+  for (let i=0;i<256;i++){ let c=i; for (let j=0;j<8;j++) c=(c&1)?(0xEDB88320^(c>>>1)):(c>>>1); t[i]=c; }
+  return t;
+})();
+
+function crc32(data) {
+  let c = 0xFFFFFFFF;
+  for (let i=0;i<data.length;i++) c = _crc32tbl[(c^data[i])&0xFF]^(c>>>8);
+  return (c^0xFFFFFFFF)>>>0;
+}
+
+async function deflateBytes(data) {
+  // Uses built-in CompressionStream (Chrome 80+, Firefox 113+, Edge 80+, Safari 16.4+)
+  const cs = new CompressionStream('deflate-raw');
+  const w = cs.writable.getWriter();
+  w.write(data); w.close();
+  const chunks = []; const r = cs.readable.getReader();
+  for (;;){ const {done,value}=await r.read(); if(done)break; chunks.push(value); }
+  const out = new Uint8Array(chunks.reduce((s,c)=>s+c.length,0));
+  let off=0; for (const c of chunks){out.set(c,off);off+=c.length;}
+  return out;
+}
+
+function dataURLtoBytes(dataURL) {
+  const b64 = dataURL.includes(',') ? dataURL.split(',')[1] : dataURL;
+  const bin = atob(b64);
+  const out = new Uint8Array(bin.length);
+  for (let i=0;i<bin.length;i++) out[i]=bin.charCodeAt(i);
+  return out;
+}
+
+function u16(v,b,o){ v.setUint16(o,b,true); }
+function u32(v,b,o){ v.setUint32(o,b,true); }
+
+function dosDateTime() {
+  const n=new Date();
+  return {
+    time: ((n.getHours()<<11)|(n.getMinutes()<<5)|(n.getSeconds()>>1))&0xFFFF,
+    date: (((n.getFullYear()-1980)<<9)|((n.getMonth()+1)<<5)|n.getDate())&0xFFFF,
+  };
+}
+
+// files: [{name:string, data:Uint8Array, compress:bool}]
+async function buildZip(files) {
+  const enc = new TextEncoder();
+  const entries = [];   // {nameBytes, localOffset, crc, method, compSize, uncompSize, time, date}
+  const parts = [];
+  let offset = 0;
+
+  for (const f of files) {
+    const nameBytes = enc.encode(f.name);
+    const uncomp = f.data;
+    const crc = crc32(uncomp);
+    const {time, date} = dosDateTime();
+
+    let comp, method;
+    if (f.compress) {
+      const deflated = await deflateBytes(uncomp);
+      // Only use compression if it actually shrinks the data
+      if (deflated.length < uncomp.length) { comp=deflated; method=8; }
+      else { comp=uncomp; method=0; }
+    } else {
+      comp=uncomp; method=0;
+    }
+
+    // Local file header: 30 bytes + filename
+    const lh = new ArrayBuffer(30+nameBytes.length);
+    const lv = new DataView(lh);
+    u32(lv,0x04034b50,0); u16(lv,20,4); u16(lv,0,6); u16(lv,method,8);
+    u16(lv,time,10); u16(lv,date,12); u32(lv,crc,14);
+    u32(lv,comp.length,18); u32(lv,uncomp.length,22);
+    u16(lv,nameBytes.length,26); u16(lv,0,28);
+    new Uint8Array(lh,30).set(nameBytes);
+
+    entries.push({nameBytes,localOffset:offset,crc,method,compSize:comp.length,uncompSize:uncomp.length,time,date});
+    offset += 30+nameBytes.length+comp.length;
+    parts.push(new Uint8Array(lh), comp);
+  }
+
+  // Central directory
+  const cdParts = [];
+  for (const e of entries) {
+    const cd = new ArrayBuffer(46+e.nameBytes.length);
+    const cv = new DataView(cd);
+    u32(cv,0x02014b50,0); u16(cv,20,4); u16(cv,20,6); u16(cv,0,8);
+    u16(cv,e.method,10); u16(cv,e.time,12); u16(cv,e.date,14);
+    u32(cv,e.crc,16); u32(cv,e.compSize,20); u32(cv,e.uncompSize,24);
+    u16(cv,e.nameBytes.length,28); u16(cv,0,30); u16(cv,0,32);
+    u16(cv,0,34); u16(cv,0,36); u32(cv,0,38); u32(cv,e.localOffset,42);
+    new Uint8Array(cd,46).set(e.nameBytes);
+    cdParts.push(new Uint8Array(cd));
+  }
+  const cdSize = cdParts.reduce((s,p)=>s+p.length,0);
+
+  // End of central directory
+  const eocd = new ArrayBuffer(22);
+  const ev = new DataView(eocd);
+  u32(ev,0x06054b50,0); u16(ev,0,4); u16(ev,0,6);
+  u16(ev,entries.length,8); u16(ev,entries.length,10);
+  u32(ev,cdSize,12); u32(ev,offset,16); u16(ev,0,20);
+
+  const allParts = [...parts,...cdParts,new Uint8Array(eocd)];
+  const total = allParts.reduce((s,p)=>s+p.length,0);
+  const result = new Uint8Array(total);
+  let pos=0; for (const p of allParts){result.set(p,pos);pos+=p.length;}
+  return result;
+}
+
+function dlZip(bytes, filename) {
+  const blob = new Blob([bytes],{type:'application/zip'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href=url; a.download=filename; a.click();
+  setTimeout(()=>URL.revokeObjectURL(url),2000);
+}
+
+// ── EXPORT ────────────────────────────────────────────────────────────────────
+function getImgSize() {
+  const img = document.getElementById('main-img');
+  return {w: img.naturalWidth||0, h: img.naturalHeight||0};
+}
+
+function buildAnnotations(crops, imgW, imgH) {
+  return crops.map((c,i) => {
+    const bx=Math.round(c.x*imgW), by=Math.round(c.y*imgH);
+    const bw=Math.round(c.w*imgW), bh=Math.round(c.h*imgH);
+    const cx=c.x+c.w/2, cy=c.y+c.h/2;
+    return {
+      index: i, card_name: c.name,
+      bbox_norm: [+c.x.toFixed(5),+c.y.toFixed(5),+(c.x+c.w).toFixed(5),+(c.y+c.h).toFixed(5)],
+      bbox_px: [bx,by,bx+bw,by+bh],
+      yolo: `0 ${cx.toFixed(6)} ${cy.toFixed(6)} ${c.w.toFixed(6)} ${c.h.toFixed(6)}`,
+      confirmed: c.ok,
+    };
+  });
+}
+
+function buildSessExport(sess, imgW=0, imgH=0) {
+  return {
+    source_image: sess.imageName,
+    image_width: imgW, image_height: imgH,
+    exported_at: new Date().toISOString(),
+    tool: 'mtg-dataset-builder',
+    annotations: buildAnnotations(sess.crops, imgW, imgH),
+  };
+}
+
+function dlBlob(content, filename, mime='application/json') {
+  const blob = new Blob([content],{type:mime});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href=url; a.download=filename; a.click();
+  setTimeout(()=>URL.revokeObjectURL(url),1000);
+}
+
+function yoloLines(crops) {
+  return crops.filter(c=>c.ok).map(c=>{
+    const cx=c.x+c.w/2, cy=c.y+c.h/2;
+    return `0 ${cx.toFixed(6)} ${cy.toFixed(6)} ${c.w.toFixed(6)} ${c.h.toFixed(6)}`;
+  }).join('\n');
+}
+
+function exportSessionJSON() {
+  if (!state.crops.length){ toast('Keine Daten',true); return; }
+  const {w,h} = getImgSize();
+  const data = buildSessExport({imageName:state.imageName,crops:state.crops}, w, h);
+  dlBlob(JSON.stringify(data,null,2), (state.label||'session')+'.json');
+  toast('JSON exportiert');
+}
+
+function exportSessionYOLO() {
+  const lines = yoloLines(state.crops);
+  if (!lines){ toast('Keine bestätigten Karten',true); return; }
+  dlBlob(lines, (state.label||'session')+'.txt','text/plain');
+  toast('YOLO TXT exportiert');
+}
+
+// Training-ZIP: images/{base}.ext + labels/{base}.txt + annotations/{base}.json
+async function exportTrainingPack() {
+  if (!state.crops.length){ toast('Keine Daten',true); return; }
+  const lines = yoloLines(state.crops);
+  if (!lines){ toast('Keine bestätigten Karten',true); return; }
+  if (!state.imageDataURL){ toast('Kein Bild geladen',true); return; }
+
+  const base = state.label || state.imageName.replace(/\.[^.]+$/,'') || 'session';
+  const ext  = (state.imageName.match(/\.([^.]+)$/)?.[1] || 'jpg').toLowerCase();
+  const enc  = new TextEncoder();
+  const {w,h} = getImgSize();
+  const json = JSON.stringify(buildSessExport({imageName:state.imageName,crops:state.crops},w,h),null,2);
+
+  toast('ZIP wird erstellt…');
+  const zip = await buildZip([
+    { name:`images/${base}.${ext}`,       data: dataURLtoBytes(state.imageDataURL), compress: false },
+    { name:`labels/${base}.txt`,           data: enc.encode(lines),                 compress: true  },
+    { name:`annotations/${base}.json`,     data: enc.encode(json),                  compress: true  },
+  ]);
+  dlZip(zip, base+'_training.zip');
+  toast(`Training-ZIP exportiert (${(zip.length/1024).toFixed(0)} KB)`);
+}
+
+async function exportSessJSON(id) {
+  const sess = state.sessions.find(s=>s.id===id);
+  if (!sess) return;
+  const data = buildSessExport(sess);
+  dlBlob(JSON.stringify(data,null,2),(sess.label||'session')+'.json');
+  toast('JSON exportiert');
+}
+
+async function exportSessTraining(id) {
+  const sess = state.sessions.find(s=>s.id===id);
+  if (!sess){ toast('Session nicht gefunden',true); return; }
+  const lines = yoloLines(sess.crops);
+  if (!lines){ toast('Keine bestätigten Karten',true); return; }
+
+  const imgData = await loadImageFromDB(id);
+  if (!imgData){ toast('Kein Bild gespeichert — Session laden und neu speichern',true); return; }
+
+  const base = sess.label || sess.imageName.replace(/\.[^.]+$/,'') || 'session';
+  const ext  = (sess.imageName.match(/\.([^.]+)$/)?.[1] || 'jpg').toLowerCase();
+  const enc  = new TextEncoder();
+  const json = JSON.stringify(buildSessExport(sess),null,2);
+
+  toast('ZIP wird erstellt…');
+  const zip = await buildZip([
+    { name:`images/${base}.${ext}`,   data: dataURLtoBytes(imgData),  compress: false },
+    { name:`labels/${base}.txt`,       data: enc.encode(lines),        compress: true  },
+    { name:`annotations/${base}.json`, data: enc.encode(json),         compress: true  },
+  ]);
+  dlZip(zip, base+'_training.zip');
+  toast(`Training-ZIP exportiert (${(zip.length/1024).toFixed(0)} KB)`);
+}
+
+function exportAllJSON() {
+  if (!state.sessions.length){ toast('Keine Sessions',true); return; }
+  const all = state.sessions.map(s=>buildSessExport(s));
+  dlBlob(JSON.stringify(all,null,2),'mtg_dataset_all.json');
+  toast('Gesamt-JSON exportiert');
+}
+
+function exportAllCSV() {
+  if (!state.sessions.length){ toast('Keine Sessions',true); return; }
+  const rows=['session,image,card_name,confirmed,x,y,w,h'];
+  state.sessions.forEach(s=>{
+    s.crops.forEach(c=>{
+      rows.push([
+        `"${(s.label||'').replace(/"/g,'""')}"`,
+        `"${(s.imageName||'').replace(/"/g,'""')}"`,
+        `"${(c.name||'').replace(/"/g,'""')}"`,
+        c.ok?1:0,
+        c.x.toFixed(6),c.y.toFixed(6),c.w.toFixed(6),c.h.toFixed(6)
+      ].join(','));
+    });
+  });
+  dlBlob(rows.join('\n'),'mtg_dataset_all.csv','text/csv');
+  toast('Gesamt-CSV exportiert');
+}
+
+// ── INIT ──────────────────────────────────────────────────────────────────────
+(async () => {
+  await openImageDB();
+  await loadSessions();
+  updateHeader(); renderSVG(); updateSidebar();
+})();
+</script>
+</body>
+</html>
