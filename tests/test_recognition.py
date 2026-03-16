@@ -53,15 +53,21 @@ def card_patch(sample_card_image) -> CardPatch:
 
 
 class TestTitleRegionExtraction:
-    def test_top_13_percent(self, sample_card_image):
-        """OCRRecognizer should crop the top 13 % of the card image."""
-        from mtg_scanner.recognition.ocr_recognizer import OCRRecognizer
+    def test_top_13_percent(self):
+        """OCRRecognizer should crop the top 13 % of the card image.
 
+        Uses a 700×500 image so the title strip (91 px) is tall enough that
+        the MIN_TITLE_HEIGHT_PX (80 px) upscaling logic does NOT trigger.
+        """
+        from mtg_scanner.recognition.ocr_recognizer import OCRRecognizer, _TITLE_STRIP_HEIGHT_FRAC
+
+        img = np.zeros((700, 500, 3), dtype=np.uint8)
         rec = OCRRecognizer()
-        region = rec._extract_title_region(sample_card_image)
-        expected_h = int(sample_card_image.shape[0] * 0.13)
+        region = rec._extract_title_region(img)
+        expected_h = int(img.shape[0] * _TITLE_STRIP_HEIGHT_FRAC)
+        from mtg_scanner.recognition.ocr_recognizer import _TITLE_STRIP_X_END_FRAC
         assert region.shape[0] == expected_h
-        assert region.shape[1] == sample_card_image.shape[1]
+        assert region.shape[1] == int(img.shape[1] * _TITLE_STRIP_X_END_FRAC)
 
     def test_title_region_not_empty(self, sample_card_image):
         from mtg_scanner.recognition.ocr_recognizer import OCRRecognizer

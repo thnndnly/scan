@@ -87,10 +87,24 @@ def _patch_to_pil(patch_image):
 # ---------------------------------------------------------------------------
 
 
-def _run_scan(image_path: str, progress=gr.Progress()):
-    """Run the pipeline and yield (status, gallery_items, summary_text)."""
-    if not image_path:
-        return "Bitte ein Bild auswählen.", [], "Kein Bild ausgewählt."
+def _run_scan(files, progress=gr.Progress()):
+    """Run the pipeline on one or more uploaded images."""
+    if not files:
+        return "Bitte mindestens ein Bild auswählen.", [], "Kein Bild ausgewählt."
+
+    if not isinstance(files, list):
+        files = [files]
+
+    # Normalize to path strings
+    paths = []
+    for f in files:
+        if isinstance(f, str):
+            paths.append(f)
+        elif hasattr(f, "name"):
+            paths.append(f.name)
+
+    if not paths:
+        return "Keine gültigen Bilddateien.", [], "Keine Bilder."
 
     try:
         from mtg_scanner.pipeline import Pipeline
@@ -98,32 +112,43 @@ def _run_scan(image_path: str, progress=gr.Progress()):
         progress(0, desc="Pipeline wird initialisiert…")
         pipeline = Pipeline()
 
-        progress(0.2, desc="Karten werden erkannt…")
-        result = pipeline.process_image(image_path)
-
-        progress(0.8, desc="Ergebnisse werden aufbereitet…")
-
         gallery_items = []
-        for card in result.cards:
-            pil_img = _patch_to_pil(card.patch.image)
-            if pil_img is not None:
-                caption = _patch_caption(card)
-                gallery_items.append((pil_img, caption))
+        total_detected = 0
+        total_recognized = 0
+        total_unknown = 0
+        total_value = 0.0
 
-        total_value = sum(
-            c.card_data.price_eur
-            for c in result.cards
-            if c.card_data and c.card_data.price_eur is not None
-        )
+        for i, path in enumerate(paths):
+            progress(
+                i / len(paths) * 0.9,
+                desc=f"Bild {i + 1}/{len(paths)}: {Path(path).name}…",
+            )
+            result = pipeline.process_image(path)
 
+            for card in result.cards:
+                pil_img = _patch_to_pil(card.patch.image)
+                if pil_img is not None:
+                    gallery_items.append((pil_img, _patch_caption(card)))
+
+            total_detected += result.total_detected
+            total_recognized += result.total_recognized
+            total_unknown += result.total_unknown
+            total_value += sum(
+                c.card_data.price_eur
+                for c in result.cards
+                if c.card_data and c.card_data.price_eur is not None
+            )
+
+        progress(1.0, desc="Fertig")
+        n = len(paths)
+        suffix = "er" if n != 1 else ""
         summary = (
-            f"Erkannt: {result.total_detected}  |  "
-            f"Identifiziert: {result.total_recognized}  |  "
-            f"Unbekannt: {result.total_unknown}  |  "
+            f"Bilder: {n}  |  Erkannt: {total_detected}  |  "
+            f"Identifiziert: {total_recognized}  |  "
+            f"Unbekannt: {total_unknown}  |  "
             f"Gesamtwert: €{total_value:.2f}"
         )
-        progress(1.0, desc="Fertig")
-        return "Scan abgeschlossen.", gallery_items, summary
+        return f"Scan abgeschlossen ({n} Bild{suffix}).", gallery_items, summary
 
     except Exception as exc:
         logger.exception("Scan fehlgeschlagen")
@@ -155,9 +180,10 @@ def _build_scanner_tab():
         gr.Markdown("## Karten scannen")
         with gr.Row():
             with gr.Column(scale=1):
-                image_input = gr.Image(
-                    type="filepath",
-                    label="Bild hochladen",
+                image_input = gr.File(
+                    file_count="multiple",
+                    file_types=["image", ".avif", ".heic", ".heif"],
+                    label="Bilder hochladen (mehrere möglich)",
                 )
                 scan_btn = gr.Button("Scan starten", variant="primary")
                 status_box = gr.Textbox(label="Status", interactive=False, lines=2)
@@ -197,8 +223,16 @@ def _build_scanner_tab():
 
 
 def _load_history():
+    import gradio as gr  # noqa: PLC0415
     dl = _get_dataset_logger()
     if dl is None:
+        from mtg_scanner.config import get_config
+        cfg = get_config()
+        if cfg.dataset.enabled and not Path(cfg.dataset.db_path).exists():
+            gr.Warning(
+                "Keine Scan-Datenbank gefunden. "
+                "Starte einen Scan, damit die Datenbank angelegt wird."
+            )
         return []
     history = dl.get_scan_history(limit=100)
     dl.close()
@@ -309,144 +343,455 @@ def _build_history_tab():
 
 
 # ---------------------------------------------------------------------------
-# Tab 3: Dataset Explorer
+# Tab 3: Nachkontrolle
 # ---------------------------------------------------------------------------
 
 
-def _load_low_confidence(threshold: float):
-    dl = _get_dataset_logger()
-    if dl is None:
+def _suggest_from_catalog(query_text: str) -> list:
+    """Fuzzy-match query_text against card names and return catalog suggestions."""
+    if not query_text or not query_text.strip():
         return []
-    patches = dl.get_low_confidence_patches(threshold=threshold)
-    dl.close()
-    rows = []
-    for p in patches:
-        rows.append([
-            p.get("detection_id", ""),
-            p.get("scan_timestamp", "")[:10] if p.get("scan_timestamp") else "",
-            p.get("card_name") or "—",
-            f"{(p.get('confidence') or 0):.0%}",
-            p.get("recognition_method") or "—",
-            p.get("patch_image_path") or "—",
-        ])
-    return rows
-
-
-def _show_patch_for_correction(evt: gr.SelectData, low_conf_data):
-    """Show the selected patch image and current recognition."""
     try:
-        if low_conf_data is None or len(low_conf_data) == 0 or evt.index[0] >= len(low_conf_data):
-            return None, "Kein Patch ausgewählt.", ""
+        import json
+        from rapidfuzz import fuzz, process
 
-        try:
-            row = list(low_conf_data.iloc[evt.index[0]])
-        except AttributeError:
-            row = low_conf_data[evt.index[0]]
-        patch_path = row[5]  # patch_image_path column
+        names_path = Path("data/card_names.json")
+        if not names_path.exists():
+            return []
+        with open(names_path, encoding="utf-8") as fh:
+            raw = json.load(fh)
+        name_list = raw if isinstance(raw, list) else list(raw.keys())
 
-        pil_img = None
-        if patch_path and patch_path != "—" and Path(patch_path).exists():
-            from PIL import Image
-            pil_img = Image.open(patch_path)
-
-        info = f"Aktuelle Erkennung: {row[2]} ({row[3]}, {row[4]})"
-        return pil_img, info, str(row[0])  # image, info, detection_id
-    except Exception as exc:
-        return None, f"Fehler: {exc}", ""
-
-
-def _search_scryfall(card_name: str):
-    """Search Scryfall for a card name."""
-    if not card_name.strip():
-        return "Bitte Kartenname eingeben."
-    try:
-        import requests
-        resp = requests.get(
-            "https://api.scryfall.com/cards/named",
-            params={"fuzzy": card_name.strip()},
-            timeout=10,
-            headers={"User-Agent": "mtg-card-scanner/0.1"},
+        matches = process.extract(
+            query_text.strip(), name_list, scorer=fuzz.WRatio, limit=8
         )
-        if resp.status_code == 200:
-            data = resp.json()
-            name = data.get("name", "?")
-            set_code = data.get("set", "?").upper()
-            prices = data.get("prices", {})
-            eur = prices.get("eur") or "—"
-            return f"Gefunden: {name} [{set_code}]  EUR: {eur}"
-        elif resp.status_code == 404:
-            return "Keine Karte gefunden."
+
+        from mtg_scanner.config import get_config
+        cfg = get_config()
+        rows = []
+        if Path(cfg.catalog.db_path).exists():
+            from mtg_scanner.lookup.card_catalog import CardCatalog
+            cat = CardCatalog(db_path=cfg.catalog.db_path)
+            for name, score, _ in matches:
+                if score < 40:
+                    continue
+                printings = cat.search_by_name(name, limit=5)
+                for p in printings:
+                    prices = p.get("prices") or {}
+                    eur = prices.get("eur") or "—"
+                    rows.append([
+                        p.get("name", name),
+                        (p.get("set_code") or "").upper(),
+                        (p.get("released_at") or "")[:4],
+                        p.get("rarity", "—"),
+                        f"€{eur}" if eur != "—" else "—",
+                        p.get("id", ""),
+                        f"{score:.0f}%",
+                    ])
+                if not printings:
+                    rows.append([name, "—", "—", "—", "—", "", f"{score:.0f}%"])
+            cat.close()
         else:
-            return f"Scryfall-Fehler: {resp.status_code}"
+            for name, score, _ in matches:
+                if score >= 40:
+                    rows.append([name, "—", "—", "—", "—", "", f"{score:.0f}%"])
+        return rows[:20]
     except Exception as exc:
-        return f"Fehler: {exc}"
+        logger.warning("Katalog-Vorschläge fehlgeschlagen: %s", exc)
+        return []
 
 
-def _save_correction(detection_id_str: str, correct_name: str):
-    if not detection_id_str or not correct_name.strip():
-        return "Bitte Korrektur-Namen eingeben und eine Zeile auswählen."
-    try:
-        detection_id = int(detection_id_str)
-        dl = _get_dataset_logger()
-        if dl is None:
-            return "Keine Datenbank verfügbar."
-        dl.correct_card(detection_id, correct_name.strip())
-        dl.close()
-        return f"Korrektur gespeichert: Detection #{detection_id} → '{correct_name.strip()}'"
-    except Exception as exc:
-        return f"Fehler: {exc}"
+def _build_nachkontrolle_tab():
+    with gr.Tab("Nachkontrolle"):
+        gr.Markdown(
+            "## Scans nachkontrollieren\n"
+            "Wähle einen Scan, prüfe jeden erkannten Patch und korrigiere Kartenname oder Erkennung."
+        )
 
+        nc_scan_id_hidden = gr.Textbox(visible=False)
+        nc_detection_id_hidden = gr.Textbox(visible=False)
 
-def _build_dataset_explorer_tab():
-    with gr.Tab("Dataset Explorer"):
-        gr.Markdown("## Niedrig-Konfidenz Patches")
         with gr.Row():
-            threshold_slider = gr.Slider(
-                minimum=0.0,
-                maximum=1.0,
-                value=0.70,
-                step=0.05,
-                label="Konfidenz-Schwellenwert",
-            )
-            load_btn = gr.Button("Laden")
-        low_conf_table = gr.Dataframe(
-            headers=["ID", "Datum", "Kartenname", "Konfidenz", "Methode", "Patch-Pfad"],
-            datatype=["str", "str", "str", "str", "str", "str"],
-            label="Niedrig-Konfidenz Erkennungen",
+            refresh_scans_btn = gr.Button("Scans laden", variant="primary")
+            nc_show_reviewed = gr.Checkbox(label="Erledigte Scans anzeigen", value=False)
+
+        nc_scans_table = gr.Dataframe(
+            headers=["ID", "Datum", "Bild", "Erkannt", "Identifiziert", "Korr. Anzahl", "Fertig"],
+            datatype=["number", "str", "str", "number", "number", "str", "str"],
+            label="Scans — Zeile anklicken",
             interactive=False,
         )
+
+        nc_reviewed_banner = gr.Markdown("", visible=False)
+
+        with gr.Row():
+            corrected_count_input = gr.Number(
+                label="Tatsächliche Anzahl Karten im Bild", precision=0, minimum=0
+            )
+            save_count_btn = gr.Button("Anzahl speichern")
+            count_status = gr.Textbox(label="Status", interactive=False)
+            finish_review_btn = gr.Button("Korrektur abschließen ✓", variant="primary")
+
+        nc_patches_gallery = gr.Gallery(
+            label="Erkannte Patches — anklicken zum Überprüfen",
+            columns=5,
+            object_fit="contain",
+            height=320,
+        )
+
+        gr.Markdown("---")
+        gr.Markdown("### Patch überprüfen")
+
         with gr.Row():
             with gr.Column(scale=1):
-                patch_preview = gr.Image(label="Patch-Vorschau", type="pil")
-                current_info = gr.Textbox(label="Aktuelle Erkennung", interactive=False)
-                detection_id_box = gr.Textbox(label="Detection ID", visible=False)
-            with gr.Column(scale=1):
-                scryfall_input = gr.Textbox(label="Scryfall-Suche (Kartenname)")
-                scryfall_btn = gr.Button("Scryfall suchen")
-                scryfall_result = gr.Textbox(label="Suchergebnis", interactive=False)
-                correction_input = gr.Textbox(label="Korrekter Kartenname")
-                save_btn = gr.Button("Korrektur speichern", variant="primary")
-                save_result = gr.Textbox(label="Status", interactive=False)
+                nc_patch_img = gr.Image(label="Patch-Bild", type="pil")
+                nc_ocr_text = gr.Textbox(label="OCR-Rohtext", interactive=False)
+                nc_current_name = gr.Textbox(label="Erkannte Karte", interactive=False)
+                nc_current_conf = gr.Textbox(label="Konfidenz & Methode", interactive=False)
+                with gr.Row():
+                    nc_approve_btn = gr.Button("✓ Karte korrekt erkannt", variant="primary")
+                    nc_reject_btn = gr.Button("✗ Keine Karte / Fehler", variant="stop")
+                nc_det_status = gr.Textbox(label="Erkennungs-Status", interactive=False)
 
-        load_btn.click(
-            fn=_load_low_confidence,
-            inputs=[threshold_slider],
-            outputs=[low_conf_table],
+            with gr.Column(scale=2):
+                gr.Markdown("### Kartenname + Edition korrigieren")
+                nc_suggest_input = gr.Textbox(
+                    label="Suchbegriff für Vorschläge",
+                    placeholder="Wird automatisch aus OCR-Text vorgeschlagen",
+                )
+                nc_suggest_btn = gr.Button("Katalog durchsuchen")
+                nc_suggestions_table = gr.Dataframe(
+                    headers=["Name", "Set", "Jahr", "Seltenheit", "EUR", "Scryfall-ID", "Score"],
+                    datatype=["str", "str", "str", "str", "str", "str", "str"],
+                    label="Vorschläge — Zeile anklicken zum Übernehmen",
+                    interactive=False,
+                )
+                nc_correction_name = gr.Textbox(label="Korrekter Kartenname")
+                nc_correction_sf_id = gr.Textbox(
+                    label="Scryfall-ID (aus Vorschlägen)", interactive=False
+                )
+                nc_save_correction_btn = gr.Button("Korrektur speichern", variant="primary")
+                nc_correction_status = gr.Textbox(label="Status", interactive=False)
+
+        # --- Event handlers ---
+
+        def load_scans_for_nc(show_reviewed=False):
+            import sqlite3 as _sq
+            from mtg_scanner.config import get_config
+            cfg = get_config()
+            if not Path(cfg.dataset.db_path).exists():
+                return []
+            conn = _sq.connect(cfg.dataset.db_path)
+            conn.row_factory = _sq.Row
+            try:
+                where = "" if show_reviewed else "WHERE (reviewed IS NULL OR reviewed = 0)"
+                rows = conn.execute(
+                    f"SELECT id, scan_timestamp, image_path, total_detected, "
+                    f"total_recognised, corrected_count, reviewed FROM scans {where} "
+                    f"ORDER BY id DESC LIMIT 200"
+                ).fetchall()
+            except Exception:
+                rows = conn.execute(
+                    "SELECT id, scan_timestamp, image_path, total_detected, "
+                    "total_recognised FROM scans ORDER BY id DESC LIMIT 200"
+                ).fetchall()
+            conn.close()
+            result = []
+            for r in rows:
+                d = dict(r)
+                corrected = d.get("corrected_count")
+                reviewed = d.get("reviewed", 0)
+                result.append([
+                    d["id"],
+                    str(d.get("scan_timestamp", ""))[:19].replace("T", " "),
+                    Path(d.get("image_path", "")).name,
+                    d.get("total_detected", 0),
+                    d.get("total_recognised", 0),
+                    str(corrected) if corrected is not None else "—",
+                    "✓ Fertig" if reviewed else "—",
+                ])
+            return result
+
+        def on_nc_scan_select(evt: gr.SelectData, table_data):
+            def _updates(detected, locked):
+                return (
+                    gr.update(value=detected, interactive=not locked),  # corrected_count_input
+                    gr.update(interactive=not locked),  # save_count_btn
+                    gr.update(interactive=not locked),  # finish_review_btn
+                    gr.update(interactive=not locked),  # nc_approve_btn
+                    gr.update(interactive=not locked),  # nc_reject_btn
+                    gr.update(interactive=not locked),  # nc_suggest_btn
+                    gr.update(interactive=not locked),  # nc_save_correction_btn
+                )
+            try:
+                if table_data is None or len(table_data) == 0:
+                    return ("", [], gr.update(visible=False), *_updates(0, False))
+                try:
+                    row = list(table_data.iloc[evt.index[0]])
+                except AttributeError:
+                    row = table_data[evt.index[0]]
+                scan_id = int(row[0])
+                detected = int(row[3]) if row[3] else 0
+                is_reviewed = str(row[6]).strip() == "✓ Fertig" if len(row) > 6 else False
+
+                import sqlite3 as _sq
+                from mtg_scanner.config import get_config
+                cfg = get_config()
+                conn = _sq.connect(cfg.dataset.db_path)
+                conn.row_factory = _sq.Row
+                dets = conn.execute(
+                    "SELECT d.id, d.patch_image_path, r.card_name, r.confidence "
+                    "FROM detections d LEFT JOIN results r ON r.detection_id = d.id "
+                    "WHERE d.scan_id = ? ORDER BY d.patch_index",
+                    (scan_id,),
+                ).fetchall()
+                conn.close()
+
+                gallery = []
+                for det in dets:
+                    path = det["patch_image_path"]
+                    if path and Path(path).exists():
+                        from PIL import Image as _PIL
+                        try:
+                            img = _PIL.open(path)
+                            name = det["card_name"] or "Unbekannt"
+                            conf = f"{(det['confidence'] or 0):.0%}"
+                            gallery.append((img, f"{name} ({conf})"))
+                        except Exception:
+                            pass
+
+                if is_reviewed:
+                    banner = gr.update(
+                        value="⚠️ **Dieser Scan wurde bereits abgeschlossen und kann nicht mehr bearbeitet werden.**",
+                        visible=True,
+                    )
+                else:
+                    banner = gr.update(visible=False)
+
+                return (str(scan_id), gallery, banner, *_updates(detected, is_reviewed))
+            except Exception as exc:
+                logger.warning("Scan-Auswahl fehlgeschlagen: %s", exc)
+                return ("", [], gr.update(visible=False), *_updates(0, False))
+
+        def save_corrected_count(scan_id_str, count):
+            if not scan_id_str:
+                return "Kein Scan ausgewählt."
+            try:
+                scan_id = int(scan_id_str)
+                count_int = int(count) if count is not None else None
+                import sqlite3 as _sq
+                from mtg_scanner.config import get_config
+                cfg = get_config()
+                conn = _sq.connect(cfg.dataset.db_path)
+                conn.execute(
+                    "UPDATE scans SET corrected_count = ? WHERE id = ?",
+                    (count_int, scan_id),
+                )
+                conn.commit()
+                conn.close()
+                return f"Anzahl für Scan #{scan_id} gespeichert: {count_int}"
+            except Exception as exc:
+                return f"Fehler: {exc}"
+
+        def on_nc_patch_select(evt: gr.SelectData, scan_id_str):
+            try:
+                if not scan_id_str:
+                    return None, "", "", "", "", ""
+                scan_id = int(scan_id_str)
+                gallery_idx = evt.index
+
+                import sqlite3 as _sq
+                from mtg_scanner.config import get_config
+                cfg = get_config()
+                conn = _sq.connect(cfg.dataset.db_path)
+                conn.row_factory = _sq.Row
+
+                dets = conn.execute(
+                    "SELECT d.id, d.patch_image_path "
+                    "FROM detections d WHERE d.scan_id = ? ORDER BY d.patch_index",
+                    (scan_id,),
+                ).fetchall()
+
+                # Filter to those with valid images (same as gallery)
+                valid_dets = [d for d in dets if d["patch_image_path"] and Path(d["patch_image_path"]).exists()]
+
+                if gallery_idx >= len(valid_dets):
+                    conn.close()
+                    return None, "", "", "", "", ""
+
+                det = valid_dets[gallery_idx]
+                det_id = det["id"]
+                patch_path = det["patch_image_path"]
+
+                attempt = conn.execute(
+                    "SELECT raw_text, matched_name, confidence, method "
+                    "FROM recognition_attempts WHERE detection_id = ? ORDER BY id ASC LIMIT 1",
+                    (det_id,),
+                ).fetchone()
+
+                result_row = conn.execute(
+                    "SELECT card_name, corrected_name, recognition_method, confidence "
+                    "FROM results WHERE detection_id = ?",
+                    (det_id,),
+                ).fetchone()
+                conn.close()
+
+                from PIL import Image as _PIL
+                pil_img = _PIL.open(patch_path)
+
+                raw_text = (attempt["raw_text"] or "") if attempt else ""
+                card_name = ""
+                conf_info = ""
+                if result_row:
+                    card_name = result_row["corrected_name"] or result_row["card_name"] or ""
+                    conf = result_row["confidence"] or 0
+                    method = result_row["recognition_method"] or "—"
+                    conf_info = f"{method}, {conf:.0%}"
+
+                return pil_img, raw_text, card_name, conf_info, str(det_id), raw_text
+            except Exception as exc:
+                logger.warning("Patch-Auswahl fehlgeschlagen: %s", exc)
+                return None, "", "", "", "", ""
+
+        def on_suggestion_select(evt: gr.SelectData, table_data):
+            try:
+                if table_data is None or len(table_data) == 0:
+                    return "", ""
+                try:
+                    row = list(table_data.iloc[evt.index[0]])
+                except AttributeError:
+                    row = table_data[evt.index[0]]
+                name = str(row[0])
+                sf_id = str(row[5]) if len(row) > 5 else ""
+                return name, sf_id
+            except Exception:
+                return "", ""
+
+        def save_nc_correction(det_id_str, name, sf_id):
+            if not det_id_str:
+                return "Kein Patch ausgewählt."
+            if not name.strip():
+                return "Bitte Kartenname eingeben."
+            try:
+                det_id = int(det_id_str)
+                dl = _get_dataset_logger()
+                if dl is None:
+                    return "Keine Datenbank verfügbar."
+                if sf_id and sf_id.strip() and sf_id.strip() not in ("—", ""):
+                    dl.assign_card(det_id, sf_id.strip(), "")
+                dl.correct_card(det_id, name.strip())
+                dl.close()
+                return f"Korrektur gespeichert: #{det_id} → '{name.strip()}'"
+            except Exception as exc:
+                return f"Fehler: {exc}"
+
+        def finish_review(scan_id_str, show_reviewed):
+            if not scan_id_str:
+                return "Kein Scan ausgewählt.", []
+            try:
+                scan_id = int(scan_id_str)
+                import sqlite3 as _sq
+                from mtg_scanner.config import get_config
+                cfg = get_config()
+                conn = _sq.connect(cfg.dataset.db_path)
+                conn.execute("UPDATE scans SET reviewed = 1 WHERE id = ?", (scan_id,))
+                conn.commit()
+                conn.close()
+                return f"Scan #{scan_id} als erledigt markiert.", load_scans_for_nc(show_reviewed)
+            except Exception as exc:
+                return f"Fehler: {exc}", []
+
+        def set_det_approved(det_id_str, approved):
+            if not det_id_str:
+                return "Kein Patch ausgewählt."
+            try:
+                det_id = int(det_id_str)
+                import sqlite3 as _sq
+                from mtg_scanner.config import get_config
+                cfg = get_config()
+                conn = _sq.connect(cfg.dataset.db_path)
+                conn.execute(
+                    "UPDATE detections SET detection_approved = ? WHERE id = ?",
+                    (1 if approved else 0, det_id),
+                )
+                conn.commit()
+                conn.close()
+                label = "✓ Korrekt markiert" if approved else "✗ Als Fehler markiert"
+                return f"Patch #{det_id}: {label}"
+            except Exception as exc:
+                return f"Fehler: {exc}"
+
+        # --- Wire up ---
+        refresh_scans_btn.click(
+            fn=load_scans_for_nc,
+            inputs=[nc_show_reviewed],
+            outputs=[nc_scans_table],
         )
-        low_conf_table.select(
-            fn=_show_patch_for_correction,
-            inputs=[low_conf_table],
-            outputs=[patch_preview, current_info, detection_id_box],
+        nc_show_reviewed.change(
+            fn=load_scans_for_nc,
+            inputs=[nc_show_reviewed],
+            outputs=[nc_scans_table],
         )
-        scryfall_btn.click(
-            fn=_search_scryfall,
-            inputs=[scryfall_input],
-            outputs=[scryfall_result],
+
+        nc_scans_table.select(
+            fn=on_nc_scan_select,
+            inputs=[nc_scans_table],
+            outputs=[
+                nc_scan_id_hidden, nc_patches_gallery, nc_reviewed_banner,
+                corrected_count_input, save_count_btn, finish_review_btn,
+                nc_approve_btn, nc_reject_btn, nc_suggest_btn, nc_save_correction_btn,
+            ],
         )
-        save_btn.click(
-            fn=_save_correction,
-            inputs=[detection_id_box, correction_input],
-            outputs=[save_result],
+
+        save_count_btn.click(
+            fn=save_corrected_count,
+            inputs=[nc_scan_id_hidden, corrected_count_input],
+            outputs=[count_status],
+        )
+
+        finish_review_btn.click(
+            fn=finish_review,
+            inputs=[nc_scan_id_hidden, nc_show_reviewed],
+            outputs=[count_status, nc_scans_table],
+        )
+
+        nc_patches_gallery.select(
+            fn=on_nc_patch_select,
+            inputs=[nc_scan_id_hidden],
+            outputs=[
+                nc_patch_img, nc_ocr_text, nc_current_name, nc_current_conf,
+                nc_detection_id_hidden, nc_suggest_input,
+            ],
+        )
+
+        nc_suggest_btn.click(
+            fn=_suggest_from_catalog,
+            inputs=[nc_suggest_input],
+            outputs=[nc_suggestions_table],
+        )
+
+        nc_suggestions_table.select(
+            fn=on_suggestion_select,
+            inputs=[nc_suggestions_table],
+            outputs=[nc_correction_name, nc_correction_sf_id],
+        )
+
+        nc_approve_btn.click(
+            fn=lambda det_id: set_det_approved(det_id, True),
+            inputs=[nc_detection_id_hidden],
+            outputs=[nc_det_status],
+        )
+
+        nc_reject_btn.click(
+            fn=lambda det_id: set_det_approved(det_id, False),
+            inputs=[nc_detection_id_hidden],
+            outputs=[nc_det_status],
+        )
+
+        nc_save_correction_btn.click(
+            fn=save_nc_correction,
+            inputs=[nc_detection_id_hidden, nc_correction_name, nc_correction_sf_id],
+            outputs=[nc_correction_status],
         )
 
 
@@ -463,7 +808,7 @@ def _hash_db_status():
     try:
         from mtg_scanner.config import get_config
         cfg = get_config()
-        hash_db_path = cfg.scryfall.cache_db_path.replace("scryfall_cache.db", "card_hashes.db")
+        hash_db_path = cfg.recognition.hash_db_path
         p = Path(hash_db_path)
         if not p.exists():
             return "Hash-DB nicht vorhanden.", 0
@@ -531,7 +876,7 @@ def _build_hash_db_background(sets_str: str, limit_str: str):
     _hash_build_log = ["Hash-DB-Aufbau gestartet…"]
     try:
         import subprocess, sys
-        scripts_dir = Path(__file__).parent.parent.parent.parent / "scripts"
+        scripts_dir = Path(__file__).parent.parent.parent / "scripts"
         script = str(scripts_dir / "build_hash_db.py")
         args = [sys.executable, script]
         if sets_str.strip():
@@ -602,7 +947,187 @@ def _build_hash_db_tab():
 
 
 # ---------------------------------------------------------------------------
-# Tab 5: Einstellungen
+# Tab 5: Training (YOLO + CLIP)
+# ---------------------------------------------------------------------------
+
+_training_log: list[str] = []
+
+
+def _clip_db_status() -> str:
+    """Return a status string for the CLIP embedding database."""
+    try:
+        from mtg_scanner.config import get_config
+        cfg = get_config()
+        db = Path(cfg.clip.db_path)
+        if not db.exists():
+            return "CLIP-DB nicht gefunden. Zuerst aufbauen."
+        import sqlite3
+        conn = sqlite3.connect(str(db))
+        count = conn.execute("SELECT COUNT(*) FROM clip_embeddings").fetchone()[0]
+        sets = conn.execute("SELECT COUNT(DISTINCT set_code) FROM clip_embeddings").fetchone()[0]
+        conn.close()
+        return f"CLIP-DB: {count} Embeddings, {sets} Sets  ({db})"
+    except Exception as exc:
+        return f"Fehler beim Lesen der CLIP-DB: {exc}"
+
+
+def _yolo_model_status() -> str:
+    """Return a status string for the fine-tuned YOLO model."""
+    try:
+        from mtg_scanner.config import get_config
+        cfg = get_config()
+        model_path = Path(cfg.detection.yolo_model_path)
+        if model_path.exists():
+            size_mb = model_path.stat().st_size / 1_048_576
+            return f"YOLO-Modell: {model_path}  ({size_mb:.1f} MB)"
+        return f"Kein YOLO-Modell gefunden ({model_path}). Erst trainieren."
+    except Exception as exc:
+        return f"Fehler: {exc}"
+
+
+def _yolo_dataset_stats() -> str:
+    """Return training dataset statistics from dataset.db."""
+    try:
+        import sqlite3
+        from mtg_scanner.config import get_config
+        cfg = get_config()
+        db = Path(cfg.dataset.db_path)
+        if not db.exists():
+            return "dataset.db nicht gefunden. Zuerst Karten scannen."
+        conn = sqlite3.connect(str(db))
+        total_scans = conn.execute("SELECT COUNT(*) FROM scans").fetchone()[0]
+        total_det = conn.execute("SELECT COUNT(*) FROM detections WHERE bbox_w > 0").fetchone()[0]
+        validated = conn.execute(
+            "SELECT COUNT(*) FROM results WHERE scryfall_id IS NOT NULL"
+        ).fetchone()[0]
+        conn.close()
+        train_n = int(total_det * 0.85)
+        val_n = total_det - train_n
+        return (
+            f"Scans: {total_scans}  |  Detektionen: {total_det}  |  Validiert: {validated}\n"
+            f"Train/Val-Split (85/15): {train_n} / {val_n}"
+        )
+    except Exception as exc:
+        return f"Fehler: {exc}"
+
+
+def _start_clip_build(sets_str: str, limit_str: str) -> str:
+    """Start building the CLIP embedding DB in the background."""
+    import subprocess, threading, sys
+    global _training_log
+    _training_log = []
+    scripts_dir = Path(__file__).parent.parent.parent.parent / "scripts"
+    script = str(scripts_dir / "build_clip_db.py")
+    args = [sys.executable, script]
+    if sets_str.strip():
+        args += ["--sets", sets_str.strip()]
+    if limit_str.strip():
+        args += ["--limit", limit_str.strip()]
+
+    def _run():
+        proc = subprocess.Popen(
+            args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
+        )
+        for line in proc.stdout:
+            _training_log.append(line.rstrip())
+        proc.wait()
+
+    threading.Thread(target=_run, daemon=True).start()
+    return "CLIP-DB-Aufbau gestartet (Hintergrundprozess). Log unten aktualisieren."
+
+
+def _start_yolo_train(epochs_str: str, base_model: str) -> str:
+    """Start YOLO fine-tuning in the background."""
+    import subprocess, threading, sys
+    global _training_log
+    _training_log = []
+    scripts_dir = Path(__file__).parent.parent.parent.parent / "scripts"
+    script = str(scripts_dir / "train_yolo.py")
+    try:
+        epochs = int(epochs_str) if epochs_str.strip() else 100
+    except ValueError:
+        epochs = 100
+    args = [sys.executable, script, "--epochs", str(epochs), "--base-model", base_model.strip() or "yolov8n.pt"]
+
+    def _run():
+        proc = subprocess.Popen(
+            args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
+        )
+        for line in proc.stdout:
+            _training_log.append(line.rstrip())
+        proc.wait()
+
+    threading.Thread(target=_run, daemon=True).start()
+    return "YOLO-Training gestartet (Hintergrundprozess). Log unten aktualisieren."
+
+
+def _get_training_log() -> str:
+    return "\n".join(_training_log) if _training_log else "Kein laufender Prozess."
+
+
+def _build_training_tab():
+    with gr.Tab("Training"):
+        gr.Markdown("## Datengetriebenes Training\n"
+                    "Validierte Patches aus der Karten-Zuordnung werden verwendet um YOLO und CLIP zu verbessern.")
+
+        with gr.Row():
+            with gr.Column():
+                gr.Markdown("### YOLO Fine-Tuning")
+                yolo_status = gr.Textbox(
+                    value=_yolo_model_status(), label="Modell-Status", interactive=False
+                )
+                dataset_stats = gr.Textbox(
+                    value=_yolo_dataset_stats(), label="Dataset-Statistik", interactive=False, lines=3
+                )
+                yolo_refresh_btn = gr.Button("Status aktualisieren")
+                yolo_epochs = gr.Textbox(label="Epochen", value="100", placeholder="100")
+                yolo_base_model = gr.Textbox(
+                    label="Basis-Modell", value="yolov8n.pt", placeholder="yolov8n.pt"
+                )
+                yolo_train_btn = gr.Button("YOLO trainieren", variant="primary")
+
+            with gr.Column():
+                gr.Markdown("### CLIP Embedding-Datenbank")
+                clip_status = gr.Textbox(
+                    value=_clip_db_status(), label="DB-Status", interactive=False
+                )
+                clip_refresh_btn = gr.Button("Status aktualisieren")
+                clip_sets = gr.Textbox(
+                    label="Sets (kommagetrennt)", placeholder="Leer = alle Sets"
+                )
+                clip_limit = gr.Textbox(
+                    label="Limit (max. Karten)", placeholder="Leer = keine Begrenzung"
+                )
+                clip_build_btn = gr.Button("CLIP-DB aufbauen", variant="primary")
+
+        training_log = gr.Textbox(label="Prozess-Log", interactive=False, lines=10)
+        log_refresh_btn = gr.Button("Log aktualisieren")
+
+        yolo_refresh_btn.click(
+            fn=lambda: (_yolo_model_status(), _yolo_dataset_stats()),
+            inputs=[],
+            outputs=[yolo_status, dataset_stats],
+        )
+        clip_refresh_btn.click(
+            fn=_clip_db_status, inputs=[], outputs=[clip_status]
+        )
+        yolo_train_btn.click(
+            fn=_start_yolo_train,
+            inputs=[yolo_epochs, yolo_base_model],
+            outputs=[training_log],
+        )
+        clip_build_btn.click(
+            fn=_start_clip_build,
+            inputs=[clip_sets, clip_limit],
+            outputs=[training_log],
+        )
+        log_refresh_btn.click(
+            fn=_get_training_log, inputs=[], outputs=[training_log]
+        )
+
+
+# ---------------------------------------------------------------------------
+# Tab 6: Einstellungen
 # ---------------------------------------------------------------------------
 
 
@@ -677,6 +1202,138 @@ def _build_settings_tab():
             inputs=[det_method, ocr_threshold, low_conf_threshold, dataset_enabled],
             outputs=[save_status],
         )
+
+
+# ---------------------------------------------------------------------------
+# Collection helpers
+# ---------------------------------------------------------------------------
+
+
+def _get_collection_manager():
+    """Return an initialised CollectionManager."""
+    try:
+        from mtg_scanner.collection import CollectionManager
+        from mtg_scanner.config import get_config
+        cfg = get_config()
+        return CollectionManager(db_path=cfg.collection.db_path)
+    except Exception as exc:
+        logger.warning("Konnte CollectionManager nicht initialisieren: %s", exc)
+        return None
+
+
+def _load_card_image_for_scryfall_id(scryfall_id: str):
+    """Fetch the card image (normal size) from catalog image_uris. Returns PIL Image or None."""
+    if not scryfall_id:
+        return None
+    try:
+        from mtg_scanner.config import get_config
+        from mtg_scanner.lookup.card_catalog import CardCatalog
+        import requests
+        from PIL import Image as PILImage
+
+        cfg = get_config()
+        if not Path(cfg.catalog.db_path).exists():
+            return None
+        cat = CardCatalog(db_path=cfg.catalog.db_path)
+        card = cat.get_by_scryfall_id(scryfall_id)
+        cat.close()
+        if not card:
+            return None
+        image_uris = card.get("image_uris") or {}
+        url = image_uris.get("normal") or image_uris.get("small") or image_uris.get("large")
+        if not url:
+            return None
+        resp = requests.get(url, timeout=15,
+                            headers={"User-Agent": "mtg-card-scanner/0.1"})
+        resp.raise_for_status()
+        return PILImage.open(io.BytesIO(resp.content))
+    except Exception as exc:
+        logger.debug("Kartenbild konnte nicht geladen werden: %s", exc)
+        return None
+
+
+def _add_to_collection_from_ui(
+    scryfall_id: str,
+    display_text: str,
+    printings_table,
+    condition: str,
+    foil: bool,
+    qty,
+    buy_price,
+) -> str:
+    """Add the currently selected card printing to the collection."""
+    if not scryfall_id:
+        return "Bitte zuerst einen Druck auswählen."
+    try:
+        quantity = max(1, int(qty or 1))
+        price = float(buy_price) if buy_price else None
+
+        # Resolve name/set from printings table
+        name, set_code, set_name, collector_number, oracle_id, lang = "", "", "", "", "", "en"
+        try:
+            import pandas as _pd
+            if printings_table is not None and hasattr(printings_table, 'iterrows'):
+                for _, row in printings_table.iterrows():
+                    if str(row.iloc[0]) == scryfall_id:
+                        oracle_id = str(row.iloc[1])
+                        set_code = str(row.iloc[2])
+                        set_name = str(row.iloc[3])
+                        collector_number = str(row.iloc[4])
+                        break
+        except Exception:
+            pass
+
+        # Fall back to catalog lookup for name
+        try:
+            from mtg_scanner.config import get_config
+            from mtg_scanner.lookup.card_catalog import CardCatalog
+            cfg = get_config()
+            if Path(cfg.catalog.db_path).exists():
+                cat = CardCatalog(db_path=cfg.catalog.db_path)
+                card = cat.get_by_scryfall_id(scryfall_id)
+                cat.close()
+                if card:
+                    name = card.get("name", "")
+                    oracle_id = oracle_id or card.get("oracle_id", "")
+                    set_code = set_code or card.get("set_code", "")
+                    set_name = set_name or card.get("set_name", "")
+                    collector_number = collector_number or card.get("collector_number", "")
+                    lang = card.get("lang", "en")
+        except Exception:
+            pass
+
+        if not name:
+            name = display_text.split("|")[0].strip() if display_text else "Unbekannt"
+
+        col = _get_collection_manager()
+        if col is None:
+            return "Sammlung nicht verfügbar."
+        entry_id = col.add_card(
+            scryfall_id=scryfall_id,
+            name=name,
+            oracle_id=oracle_id,
+            set_code=set_code,
+            set_name=set_name,
+            collector_number=collector_number,
+            lang=lang,
+            foil=bool(foil),
+            condition=condition or "NM",
+            quantity=quantity,
+            buy_price=price,
+        )
+        col.close()
+        foil_str = " (Foil)" if foil else ""
+        return f"✓ {quantity}x {name}{foil_str} [{condition}] zur Sammlung hinzugefügt (#{entry_id})"
+    except Exception as exc:
+        logger.warning("Sammlung hinzufügen fehlgeschlagen: %s", exc)
+        return f"Fehler: {exc}"
+
+
+# ---------------------------------------------------------------------------
+# Tab: Sammlung
+# ---------------------------------------------------------------------------
+
+
 
 
 # ---------------------------------------------------------------------------
@@ -838,8 +1495,25 @@ def _build_catalog_tab():
                     selected_card_display = gr.Textbox(
                         label="Ausgewählter Druck", interactive=False
                     )
+                card_image_preview = gr.Image(
+                    label="Kartenbild", type="pil", height=280
+                )
                 assign_btn = gr.Button("Zuordnung speichern", variant="primary")
                 assign_status = gr.Textbox(label="Ergebnis", interactive=False)
+                gr.Markdown("### 4. Zur Sammlung hinzufügen")
+                with gr.Row():
+                    coll_condition = gr.Dropdown(
+                        choices=["NM", "LP", "MP", "HP", "DMG"],
+                        value="NM",
+                        label="Zustand",
+                    )
+                    coll_foil = gr.Checkbox(label="Foil")
+                    coll_qty = gr.Number(value=1, label="Anzahl", precision=0, minimum=1)
+                    coll_buy_price = gr.Number(
+                        value=None, label="Kaufpreis (EUR)", precision=2
+                    )
+                add_to_collection_btn = gr.Button("Zur Sammlung hinzufügen")
+                collection_status = gr.Textbox(label="Sammlungs-Status", interactive=False)
 
         # --- Wire up ---
 
@@ -911,7 +1585,7 @@ def _build_catalog_tab():
         def on_printing_select(evt: gr.SelectData, table_data):
             try:
                 if table_data is None or len(table_data) == 0:
-                    return "", ""
+                    return "", "", None
                 try:
                     row = list(table_data.iloc[evt.index[0]])
                 except AttributeError:
@@ -921,9 +1595,11 @@ def _build_catalog_tab():
                     f"{row[2]} {row[3]} #{row[4]} "
                     f"| {row[6]} | {row[7]} | {row[9]} | {row[10]}"
                 )
-                return scryfall_id, display
+                # Load card image from catalog image_uris
+                card_img = _load_card_image_for_scryfall_id(scryfall_id)
+                return scryfall_id, display, card_img
             except Exception:
-                return "", ""
+                return "", "", None
 
         def do_assign(det_id, sf_id, table_data, display_text):
             oracle_id = ""
@@ -963,12 +1639,20 @@ def _build_catalog_tab():
         printings_table.select(
             fn=on_printing_select,
             inputs=[printings_table],
-            outputs=[selected_scryfall_id, selected_card_display],
+            outputs=[selected_scryfall_id, selected_card_display, card_image_preview],
         )
         assign_btn.click(
             fn=do_assign,
             inputs=[selected_detection_id, selected_scryfall_id, printings_table, selected_card_display],
             outputs=[assign_status],
+        )
+        add_to_collection_btn.click(
+            fn=_add_to_collection_from_ui,
+            inputs=[
+                selected_scryfall_id, selected_card_display, printings_table,
+                coll_condition, coll_foil, coll_qty, coll_buy_price,
+            ],
+            outputs=[collection_status],
         )
 
 
@@ -1077,6 +1761,8 @@ def _gt_prefill_from_table(evt: gr.SelectData, table_data):
         return img_path, count, cards
     except Exception:
         return "", "", ""
+
+
 
 
 def _build_evaluation_tab():
@@ -1324,8 +2010,9 @@ def create_ui() -> gr.Blocks:
         gr.Markdown("# MTG Card Scanner")
         _build_scanner_tab()
         _build_history_tab()
-        _build_dataset_explorer_tab()
+        _build_nachkontrolle_tab()
         _build_hash_db_tab()
+        _build_training_tab()
         _build_catalog_tab()
         _build_evaluation_tab()
         _build_archive_tab()

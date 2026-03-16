@@ -73,9 +73,7 @@ class HashRecognizer(BaseRecognizer):
         top_k: int = 5,
     ) -> None:
         cfg = get_config()
-        self._db_path = db_path or cfg.scryfall.cache_db_path.replace(
-            "scryfall_cache.db", "card_hashes.db"
-        )
+        self._db_path = db_path or cfg.recognition.hash_db_path
         # Prefer explicit recognition config
         self._max_hamming = (
             max_hamming_distance
@@ -84,6 +82,7 @@ class HashRecognizer(BaseRecognizer):
         )
         self._top_k = top_k
         self._conn: Optional[sqlite3.Connection] = None
+        self._candidates_cache: Optional[list[tuple[str, str, Optional[str]]]] = None
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -121,16 +120,20 @@ class HashRecognizer(BaseRecognizer):
         return crop_region(image, y_start_frac=0.20, y_end_frac=0.65, x_margin_px=5)
 
     def _query_candidates(self, conn: sqlite3.Connection) -> list[tuple[str, str, Optional[str]]]:
-        """Fetch all hash rows from the database.
+        """Fetch all hash rows from the database, cached after first load.
 
         Returns:
             List of ``(card_name, hash_value, set_code)`` tuples.
         """
+        if self._candidates_cache is not None:
+            return self._candidates_cache
         try:
             rows = conn.execute(
                 "SELECT card_name, hash_value, set_code FROM card_hashes;"
             ).fetchall()
-            return [(r["card_name"], r["hash_value"], r["set_code"]) for r in rows]
+            self._candidates_cache = [(r["card_name"], r["hash_value"], r["set_code"]) for r in rows]
+            logger.debug("Hash DB: loaded %d candidates into memory cache", len(self._candidates_cache))
+            return self._candidates_cache
         except Exception as exc:
             logger.warning("Failed to query hash DB: %s", exc)
             return []
@@ -157,14 +160,6 @@ class HashRecognizer(BaseRecognizer):
         Returns:
             ``(card_name, confidence)`` or ``(None, 0.0)`` on failure.
         """
-        try:
-            import imagehash  # noqa: F401 – ensure the package is available
-        except ImportError as exc:
-            raise ImportError(
-                "The 'imagehash' package is required for hash recognition.\n"
-                "Install it with:  pip install imagehash"
-            ) from exc
-
         conn = self._get_conn()
         if conn is None:
             return None, 0.0
@@ -218,17 +213,30 @@ class HashRecognizer(BaseRecognizer):
             )
             return None, 0.0
 
-        confidence = 1.0 - (best_dist / self._max_hamming)
+        confidence = 1.0 if self._max_hamming == 0 else 1.0 - (best_dist / self._max_hamming)
         logger.info(
             "Hash: matched %r (hamming=%d, confidence=%.2f)", best_name, best_dist, confidence
         )
         return best_name, float(confidence)
 
     def close(self) -> None:
-        """Close the database connection."""
+        """Close the database connection and clear the in-memory cache."""
+        self._candidates_cache = None
         if self._conn is not None:
             try:
                 self._conn.close()
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("Error closing hash DB connection: %s", exc)
             self._conn = None
+
+    def __del__(self) -> None:
+        try:
+            self.close()
+        except Exception as exc:
+            logger.debug("Error in HashRecognizer.__del__: %s", exc)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        self.close()

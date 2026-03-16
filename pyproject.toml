@@ -25,6 +25,9 @@ dependencies = [
 [project.optional-dependencies]
 yolo = ["ultralytics>=8.0"]
 llm = ["openai>=1.0"]
+claude = ["anthropic>=0.20"]
+clip = ["transformers>=4.30", "Pillow>=10.0", "open_clip_torch>=2.20"]
+paddle = ["paddleocr>=2.7", "paddlepaddle>=2.5"]
 ui = ["gradio>=4.0"]
 dev = ["pytest>=7.0", "pytest-cov", "ruff"]
 

@@ -1,0 +1,83 @@
+[
+  {
+    "id": 1,
+    "sha256": "c900fecbec8db6fc00e929f15a1fd49e6973c1589232c9a35990d9d308352e1c",
+    "original_filename": "C:\\Users\\karl\\AppData\\Local\\Temp\\pytest-of-karl\\pytest-0\\test_directory_with_images0\\a.jpg",
+    "scan_id": 1,
+    "captured_at": "2026-03-15T19:55:04.844887+00:00",
+    "original_size_bytes": 823,
+    "stored_size_bytes": 823
+  },
+  {
+    "id": 2,
+    "sha256": "3adc16aa21e7d99c1b8f8eca5499ab1d5347f6634eb044d8af5737cd3d23be26",
+    "original_filename": "C:\\Users\\karl\\AppData\\Local\\Temp\\gradio\\73a9b4fb74a057eb4c6ff486cb6897fd676c7768a6a5d9c2fe6b4afe6e10f56d\\8a8bffdf-76fa-4abc-8c04-6571ebb68642.avif",
+    "scan_id": null,
+    "captured_at": "2026-03-15T20:50:10.453147+00:00",
+    "original_size_bytes": 348361,
+    "stored_size_bytes": 149914
+  },
+  {
+    "id": 3,
+    "sha256": "004fa0eced34aba3f1f402c8d432b690dd3d8ff73c37aea4a40255eea8ae5471",
+    "original_filename": "C:\\Users\\karl\\AppData\\Local\\Temp\\gradio\\22adc8f3368e9e1421003f330a853eb2effb8987db99e06bec848bd41b8ff33b\\c6505473-ef46-43d7-b2ce-3cbe39487788.avif",
+    "scan_id": 2,
+    "captured_at": "2026-03-15T20:58:17.443372+00:00",
+    "original_size_bytes": 351442,
+    "stored_size_bytes": 146626
+  },
+  {
+    "id": 4,
+    "sha256": "216c6dff7600aeb650ebe562c4061ece466ec19298c70163a5fcff39b035aa77",
+    "original_filename": "C:\\Users\\karl\\AppData\\Local\\Temp\\gradio\\075f289f4f6a784b2c8ff6fea1a78202a6c853f1dba08ac86509142f5e0d63ba\\b9d14004-733f-431f-8c2a-398bc2988c47.avif",
+    "scan_id": 3,
+    "captured_at": "2026-03-15T20:59:41.794023+00:00",
+    "original_size_bytes": 351801,
+    "stored_size_bytes": 147291
+  },
+  {
+    "id": 5,
+    "sha256": "6c89c7c2bbaf6bfee1d0074ec4f5496d8f4c7991509b960dff0b418d754aa933",
+    "original_filename": "16bf8e1f-549e-4a82-ae41-1143fc8249af.avif",
+    "scan_id": 5,
+    "captured_at": "2026-03-15T21:30:39.332316+00:00",
+    "original_size_bytes": 375102,
+    "stored_size_bytes": 157283
+  },
+  {
+    "id": 6,
+    "sha256": "feece306fa6cf5b9dc994e2d1a6afa9a24947d9d258e0cd9c4f996dcf3b103dc",
+    "original_filename": "C:\\Users\\karl\\AppData\\Local\\Temp\\gradio\\bd5da85a2c6cd9f8a921351eead6258381dd46e05b1f76f03cd7a23c189dcb76\\7895911b-4434-4a74-a2dd-68e7108682dc.avif",
+    "scan_id": 13,
+    "captured_at": "2026-03-15T22:55:33.888116+00:00",
+    "original_size_bytes": 346942,
+    "stored_size_bytes": 144742
+  },
+  {
+    "id": 7,
+    "sha256": "1ab471ed01df7734419965d4af2d244ae05baf53528a70cb016928256574f3f6",
+    "original_filename": "C:\\Users\\karl\\AppData\\Local\\Temp\\gradio\\273aa6b061b8a72d46d189784b52d6ca899764b113a86273276d6ca9f2ec3b8e\\69718385-0384-4780-9b27-244ae7a7eae4.avif",
+    "scan_id": 14,
+    "captured_at": "2026-03-15T22:56:20.845703+00:00",
+    "original_size_bytes": 348670,
+    "stored_size_bytes": 146616
+  },
+  {
+    "id": 8,
+    "sha256": "b68997d6c5bdae2afbd13b0f9cb7063f6141be7529dc2c4b09b7f42f9d714187",
+    "original_filename": "C:\\Users\\karl\\AppData\\Local\\Temp\\gradio\\de4d17252c3e65fa2c7f2a8dce5a9292abca43398d6289294df6d2dc9b32199c\\2c43cd38-411f-428a-a0e3-4ebc0c24d942.avif",
+    "scan_id": 15,
+    "captured_at": "2026-03-15T22:56:22.841613+00:00",
+    "original_size_bytes": 354140,
+    "stored_size_bytes": 148035
+  },
+  {
+    "id": 9,
+    "sha256": "cda62e769281d1d61ae4eba5d6f1274af50a75392bf9a3c1879c6b505dc9ca96",
+    "original_filename": "C:\\Users\\karl\\AppData\\Local\\Temp\\gradio\\d0d16ef95262a0ee165b025e804225f257bd0331cdf6dc49d3636f36e27fa569\\alpha_deck.jpg",
+    "scan_id": 32,
+    "captured_at": "2026-03-16T00:07:12.347850+00:00",
+    "original_size_bytes": 4564073,
+    "stored_size_bytes": 402983
+  }
+]

@@ -6,11 +6,12 @@ import csv
 import json
 import logging
 import os
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as _FuturesTimeout
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Optional
 
-from mtg_scanner.config import get_config
+from mtg_scanner.config import RecognitionMethod, get_config
 from mtg_scanner.detection.base import BaseDetector
 from mtg_scanner.detection.opencv_detector import OpenCVDetector
 from mtg_scanner.detection.yolo_detector import YOLODetector
@@ -104,9 +105,25 @@ class Pipeline:
             db_path=cfg.scryfall.cache_db_path,
             ttl_hours=cfg.scryfall.cache_ttl_hours,
         )
+
+        # Attach local catalog to the Scryfall client when prefer_local is set
+        _catalog = None
+        if cfg.scryfall.prefer_local and cfg.catalog.enabled:
+            from pathlib import Path as _Path
+            if _Path(cfg.catalog.db_path).exists():
+                try:
+                    from mtg_scanner.lookup.card_catalog import CardCatalog
+                    _catalog = CardCatalog(db_path=cfg.catalog.db_path)
+                    logger.info("Local card catalog attached for offline lookups (%s)",
+                                cfg.catalog.db_path)
+                except Exception as _exc:
+                    logger.warning("Could not open card catalog for offline lookup: %s", _exc)
+
         self._scryfall: ScryfallClient = scryfall_client or ScryfallClient(
             cache=cache,
             rate_limit_ms=cfg.scryfall.rate_limit_ms,
+            catalog=_catalog,
+            prefer_local=cfg.scryfall.prefer_local,
         )
 
         self._save_patches = (
@@ -167,8 +184,16 @@ class Pipeline:
             return HashRecognizer()
         if method == "llm":
             from mtg_scanner.recognition.llm_recognizer import LLMRecognizer
-
             return LLMRecognizer()
+        if method == "claude":
+            from mtg_scanner.recognition.claude_recognizer import ClaudeRecognizer
+            return ClaudeRecognizer()
+        if method == "clip":
+            from mtg_scanner.recognition.clip_recognizer import ClipRecognizer
+            return ClipRecognizer()
+        if method == "paddle":
+            from mtg_scanner.recognition.paddle_recognizer import PaddleRecognizer
+            return PaddleRecognizer()
         return OCRRecognizer()
 
     # ------------------------------------------------------------------
@@ -178,46 +203,68 @@ class Pipeline:
     def _recognize_with_fallback(
         self, patch: CardPatch
     ) -> tuple[Optional[str], float, str]:
-        """Try primary → fallback → LLM → unknown recognition chain.
+        """Try primary → fallback chain → unknown recognition.
+
+        Uses ``recognition.fallback_chain`` from config when set (e.g.
+        ``['hash', 'clip', 'claude']``); otherwise falls back to the legacy
+        single ``fallback_method`` + optional ``llm_fallback_enabled`` flag.
 
         Args:
             patch: Detected card patch to recognise.
 
         Returns:
             ``(card_name, confidence, method)`` where *method* is one of
-            ``'ocr'``, ``'hash'``, ``'llm'``, or ``'unknown'``.
+            ``'ocr'``, ``'hash'``, ``'clip'``, ``'claude'``, ``'llm'``,
+            or ``'unknown'``.
         """
         cfg = get_config().recognition
 
         # Primary attempt
         try:
             name, conf = self._primary.recognize(patch)
-            method = cfg.primary_method
             if name is not None and conf >= cfg.ocr_confidence_threshold:
-                return name, conf, method
+                return name, conf, cfg.primary_method
         except Exception as exc:
             logger.warning("Primary recogniser raised an exception: %s", exc)
 
-        # Fallback attempt
-        if self._fallback is not None:
-            try:
-                name, conf = self._fallback.recognize(patch)
-                method = cfg.fallback_method
-                if name is not None and conf > 0.0:
-                    return name, conf, method
-            except Exception as exc:
-                logger.warning("Fallback recogniser raised an exception: %s", exc)
+        # Build fallback sequence
+        if cfg.fallback_chain:
+            chain = cfg.fallback_chain
+        else:
+            chain = [cfg.fallback_method]
+            if cfg.llm_fallback_enabled and "llm" not in chain:
+                chain.append("llm")
 
-        # LLM attempt (optional, expensive)
-        if self._llm is not None:
+        for fallback_method in chain:
+            recognizer = self._get_fallback_recognizer(fallback_method)
+            if recognizer is None:
+                continue
             try:
-                name, conf = self._llm.recognize(patch)
-                if name is not None and conf > 0.0:
-                    return name, conf, "llm"
+                name, conf = recognizer.recognize(patch)
+                if name is not None and conf >= get_config().output.low_confidence_threshold:
+                    return name, conf, fallback_method
             except Exception as exc:
-                logger.warning("LLM recogniser raised an exception: %s", exc)
+                logger.warning("Fallback recogniser %r raised: %s", fallback_method, exc)
 
         return None, 0.0, "unknown"
+
+    def _get_fallback_recognizer(self, method: str) -> Optional[BaseRecognizer]:
+        """Return or lazily create a recognizer for the given method name."""
+        if method == get_config().recognition.fallback_method and self._fallback is not None:
+            return self._fallback
+        if method == "llm" and self._llm is not None:
+            return self._llm
+        # Lazily create for methods not pre-built at init time
+        if not hasattr(self, "_extra_recognizers"):
+            self._extra_recognizers: dict[str, BaseRecognizer] = {}
+        if method not in self._extra_recognizers:
+            try:
+                self._extra_recognizers[method] = self._build_recognizer(method)
+            except Exception as exc:
+                logger.warning("Could not build recogniser %r: %s", method, exc)
+                return None
+        return self._extra_recognizers[method]
+
 
     # ------------------------------------------------------------------
     # Core processing
@@ -260,14 +307,16 @@ class Pipeline:
             except Exception as exc:
                 logger.warning("Could not load image for logging: %s", exc)
 
-        # --- Dataset: log scan ---
+        # --- Dataset: log scan (all logging for this image in one transaction) ---
         scan_id: Optional[int] = None
         if self._dataset_logger is not None and img is not None:
             try:
+                self._dataset_logger.begin_batch()
                 image_shape = img.shape if img is not None else (0, 0)
                 scan_id = self._dataset_logger.log_scan(image_path, image_shape)
             except Exception as exc:
                 logger.warning("DatasetLogger.log_scan failed: %s", exc)
+                self._dataset_logger.rollback_batch()
 
         # --- Archive: store original image ---
         archive_id: Optional[int] = None
@@ -295,8 +344,21 @@ class Pipeline:
                 except Exception as exc:
                     logger.warning("DatasetLogger.log_detection failed: %s", exc)
 
-            # --- Recognition ---
-            card_name, confidence, method = self._recognize_with_fallback(patch)
+            # --- Recognition (with optional timeout) ---
+            timeout_s = get_config().output.recognition_timeout_seconds
+            if timeout_s > 0:
+                with ThreadPoolExecutor(max_workers=1) as _pool:
+                    _fut = _pool.submit(self._recognize_with_fallback, patch)
+                    try:
+                        card_name, confidence, method = _fut.result(timeout=timeout_s)
+                    except _FuturesTimeout:
+                        logger.warning(
+                            "Recognition timed out after %ds for patch %d of %s",
+                            timeout_s, patch.patch_index, image_path,
+                        )
+                        card_name, confidence, method = None, 0.0, "timeout"
+            else:
+                card_name, confidence, method = self._recognize_with_fallback(patch)
 
             # --- Dataset: log recognition attempt ---
             if self._dataset_logger is not None and detection_id is not None:
@@ -348,12 +410,17 @@ class Pipeline:
             total_unknown=total_unknown,
         )
 
-        # --- Dataset: finish scan ---
+        # --- Dataset: finish scan + commit entire scan transaction ---
         if self._dataset_logger is not None and scan_id is not None:
             try:
                 self._dataset_logger.finish_scan(scan_id, result)
+                self._dataset_logger.commit_batch()
             except Exception as exc:
                 logger.warning("DatasetLogger.finish_scan failed: %s", exc)
+                try:
+                    self._dataset_logger.rollback_batch()
+                except Exception:
+                    pass
 
         logger.info(
             "Finished %s: detected=%d recognised=%d unknown=%d",
@@ -462,3 +529,18 @@ class Pipeline:
                         logger.error("Failed to write CSV for %s: %s", stem, exc)
 
         return written
+
+
+def cfg_method_name(recognizer: Optional[BaseRecognizer]) -> str:
+    """Return a config method name string for a recognizer instance."""
+    if recognizer is None:
+        return ""
+    cls = type(recognizer).__name__
+    return {
+        "OCRRecognizer": "ocr",
+        "HashRecognizer": "hash",
+        "LLMRecognizer": "llm",
+        "ClaudeRecognizer": "claude",
+        "ClipRecognizer": "clip",
+        "PaddleRecognizer": "paddle",
+    }.get(cls, cls.lower())

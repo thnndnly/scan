@@ -1,4 +1,4 @@
-"""OpenCV-based MTG card detector using contour analysis."""
+"""OpenCV-based MTG card detector using contour analysis with grid fallback."""
 
 from __future__ import annotations
 
@@ -16,6 +16,16 @@ from mtg_scanner.utils.image_utils import load_image
 
 logger = logging.getLogger(__name__)
 
+# ---------------------------------------------------------------------------
+# Card geometry constants
+# ---------------------------------------------------------------------------
+
+# Standard MTG card aspect ratio (63 mm × 88 mm = 0.7159…)
+_CARD_IDEAL_ASPECT_RATIO: float = 0.714
+
+# Grid fallback: refuse to produce more than this many cells (rows × cols).
+# Prevents false positives on dense textures that Hough mistakes for a grid.
+_GRID_MAX_CELLS: int = 24
 
 # ---------------------------------------------------------------------------
 # Geometry helpers
@@ -23,70 +33,33 @@ logger = logging.getLogger(__name__)
 
 
 def order_points(pts: np.ndarray) -> np.ndarray:
-    """Sort four corner points into a consistent (TL, TR, BR, BL) order.
-
-    Args:
-        pts: Array of shape (4, 2) containing corner (x, y) coordinates.
-
-    Returns:
-        Array of shape (4, 2) ordered as top-left, top-right,
-        bottom-right, bottom-left.
-    """
+    """Sort four corner points into a consistent (TL, TR, BR, BL) order."""
     rect = np.zeros((4, 2), dtype=np.float32)
-
-    # Sum of coords: smallest → TL, largest → BR
     s = pts.sum(axis=1)
     rect[0] = pts[np.argmin(s)]
     rect[2] = pts[np.argmax(s)]
-
-    # Difference of coords: smallest → TR, largest → BL
     diff = np.diff(pts, axis=1)
     rect[1] = pts[np.argmin(diff)]
     rect[3] = pts[np.argmax(diff)]
-
     return rect
 
 
 def four_point_transform(image: np.ndarray, pts: np.ndarray) -> np.ndarray:
-    """Apply a perspective transformation to extract a rectangular region.
-
-    Given four corner points that define a quadrilateral in *image*, this
-    function computes the destination rectangle dimensions (preserving the
-    natural aspect ratio of the detected shape) and performs the warp.
-
-    Args:
-        image: Source image.
-        pts: Array of shape (4, 2) with the four corner points.
-
-    Returns:
-        Warped (perspective-corrected) image patch.
-    """
+    """Apply a perspective transformation to extract a rectangular region."""
     rect = order_points(pts)
     (tl, tr, br, bl) = rect
-
-    # Width: max of top and bottom edge lengths
     width_a = np.linalg.norm(br - bl)
     width_b = np.linalg.norm(tr - tl)
     max_width = max(int(width_a), int(width_b))
-
-    # Height: max of left and right edge lengths
     height_a = np.linalg.norm(tr - br)
     height_b = np.linalg.norm(tl - bl)
     max_height = max(int(height_a), int(height_b))
-
     dst = np.array(
-        [
-            [0, 0],
-            [max_width - 1, 0],
-            [max_width - 1, max_height - 1],
-            [0, max_height - 1],
-        ],
+        [[0, 0], [max_width - 1, 0], [max_width - 1, max_height - 1], [0, max_height - 1]],
         dtype=np.float32,
     )
-
     M = cv2.getPerspectiveTransform(rect, dst)
-    warped = cv2.warpPerspective(image, M, (max_width, max_height))
-    return warped
+    return cv2.warpPerspective(image, M, (max_width, max_height))
 
 
 # ---------------------------------------------------------------------------
@@ -95,23 +68,10 @@ def four_point_transform(image: np.ndarray, pts: np.ndarray) -> np.ndarray:
 
 
 class OpenCVDetector(BaseDetector):
-    """Card detector that uses classical computer vision with OpenCV.
+    """Card detector using classical computer vision with a grid-layout fallback.
 
-    Pipeline
-    --------
-    1. Convert to grayscale.
-    2. Gaussian blur (5 × 5).
-    3. CLAHE for contrast normalisation.
-    4. Canny edge detection.
-    5. Morphological closing to bridge edge gaps.
-    6. Contour detection (RETR_EXTERNAL).
-    7. Approximate polygon fitting; keep quadrilaterals / pentagons / hexagons
-       that satisfy minimum area and aspect-ratio constraints.
-    8. Perspective correction via four-point transform.
-
-    Args:
-        config_override: Optional dict of config values that override
-            ``config.yaml`` settings for the ``detection`` section.
+    Primary pipeline: Canny edges → contour analysis → NMS.
+    Fallback (when primary finds 0 cards): Hough lines → grid subdivision.
     """
 
     def __init__(self, config_override: Optional[dict] = None) -> None:
@@ -120,7 +80,9 @@ class OpenCVDetector(BaseDetector):
         self._aspect_ratio_min: float = cfg.aspect_ratio_min
         self._aspect_ratio_max: float = cfg.aspect_ratio_max
         self._min_card_area_px: int = cfg.min_card_area_px
+        self._max_card_area_frac: float = cfg.max_card_area_frac
         self._save_debug: bool = cfg.save_debug
+        self._iou_nms_threshold: float = cfg.iou_nms_threshold
 
         if config_override:
             for k, v in config_override.items():
@@ -131,31 +93,13 @@ class OpenCVDetector(BaseDetector):
     # ------------------------------------------------------------------
 
     def _preprocess(self, image: np.ndarray) -> np.ndarray:
-        """Return a binary edge map suitable for contour extraction.
-
-        Args:
-            image: BGR source image.
-
-        Returns:
-            Binary edge image (single channel, uint8).
-        """
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-
-        # Gaussian blur to suppress high-frequency noise
         blurred = cv2.GaussianBlur(gray, (5, 5), 0)
-
-        # CLAHE: improve local contrast
         clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
         enhanced = clahe.apply(blurred)
-
-        # Canny edge detection — lower thresholds catch more card borders
         edges = cv2.Canny(enhanced, 30, 100)
-
-        # Morphological closing: small kernel so adjacent cards don't merge
         kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
-        closed = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, kernel)
-
-        return closed
+        return cv2.morphologyEx(edges, cv2.MORPH_CLOSE, kernel)
 
     # ------------------------------------------------------------------
     # Contour filtering
@@ -164,30 +108,17 @@ class OpenCVDetector(BaseDetector):
     def _is_valid_card_contour(
         self, contour: np.ndarray, image_area: int
     ) -> tuple[bool, float]:
-        """Check whether *contour* looks like an MTG card.
-
-        Args:
-            contour: Contour array from ``cv2.findContours``.
-            image_area: Total image area in pixels (used to normalise size).
-
-        Returns:
-            ``(valid, confidence)`` where *confidence* is a rough estimate
-            based on aspect ratio deviation from the ideal MTG ratio (~0.714).
-        """
         area = cv2.contourArea(contour)
         if area < self._min_card_area_px:
             return False, 0.0
-
-        # Approximate the contour to a polygon
-        peri = cv2.arcLength(contour, True)
-        approx = cv2.approxPolyDP(contour, 0.02 * peri, True)
-        n_corners = len(approx)
-
-        # Only accept shapes with 4-6 vertices
-        if not (4 <= n_corners <= 6):
+        if area > self._max_card_area_frac * image_area:
             return False, 0.0
 
-        # Fit a rotated bounding rectangle and check aspect ratio
+        peri = cv2.arcLength(contour, True)
+        approx = cv2.approxPolyDP(contour, 0.02 * peri, True)
+        if not (4 <= len(approx) <= 6):
+            return False, 0.0
+
         _, (w, h), _ = cv2.minAreaRect(contour)
         if w == 0 or h == 0:
             return False, 0.0
@@ -196,27 +127,106 @@ class OpenCVDetector(BaseDetector):
         if not (self._aspect_ratio_min <= aspect <= self._aspect_ratio_max):
             return False, 0.0
 
-        # Confidence based on how close the aspect ratio is to the ideal
-        ideal_ratio = 0.714
-        aspect_diff = abs(aspect - ideal_ratio) / ideal_ratio
-        confidence = max(0.0, 1.0 - aspect_diff)
-
+        confidence = max(0.0, 1.0 - abs(aspect - _CARD_IDEAL_ASPECT_RATIO) / _CARD_IDEAL_ASPECT_RATIO)
         return True, float(confidence)
+
+    # ------------------------------------------------------------------
+    # Grid fallback detection
+    # ------------------------------------------------------------------
+
+    def _detect_grid(self, image: np.ndarray) -> list[tuple[float, tuple, np.ndarray]]:
+        """Detect cards in grid layouts using Hough line intersection.
+
+        When cards are laid out in a touching grid, contour detection finds the
+        outer border of the entire group instead of individual cards.  This
+        fallback:
+        1. Detects horizontal and vertical lines via HoughLinesP.
+        2. Clusters nearby lines to find row/column separators.
+        3. Extracts each grid cell as a card candidate.
+        """
+        h, w = image.shape[:2]
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+        edges = cv2.Canny(blurred, 30, 100)
+
+        lines = cv2.HoughLinesP(
+            edges, rho=1, theta=np.pi / 180, threshold=100,
+            minLineLength=min(w, h) // 6, maxLineGap=20,
+        )
+        if lines is None:
+            return []
+
+        h_lines: list[int] = []  # y positions of horizontal lines
+        v_lines: list[int] = []  # x positions of vertical lines
+
+        for line in lines:
+            x1, y1, x2, y2 = line[0]
+            angle = abs(np.degrees(np.arctan2(y2 - y1, x2 - x1)))
+            if angle < 10 or angle > 170:           # nearly horizontal
+                h_lines.append((y1 + y2) // 2)
+            elif 80 < angle < 100:                  # nearly vertical
+                v_lines.append((x1 + x2) // 2)
+
+        def _cluster(positions: list[int], gap: int = 20) -> list[int]:
+            if not positions:
+                return []
+            positions = sorted(set(positions))
+            clusters = [[positions[0]]]
+            for p in positions[1:]:
+                if p - clusters[-1][-1] < gap:
+                    clusters[-1].append(p)
+                else:
+                    clusters.append([p])
+            return [int(np.mean(c)) for c in clusters]
+
+        ys = _cluster(h_lines)
+        xs = _cluster(v_lines)
+
+        # Add image borders so we cover the full image
+        if not ys or ys[0] > h * 0.1:
+            ys = [0] + ys
+        if not ys or ys[-1] < h * 0.9:
+            ys = ys + [h]
+        if not xs or xs[0] > w * 0.1:
+            xs = [0] + xs
+        if not xs or xs[-1] < w * 0.9:
+            xs = xs + [w]
+
+        rows = len(ys) - 1
+        cols = len(xs) - 1
+
+        if rows < 1 or cols < 1 or rows * cols > _GRID_MAX_CELLS:
+            return []
+
+        # Each cell's aspect ratio must look like a card
+        cell_w = (xs[-1] - xs[0]) / cols
+        cell_h = (ys[-1] - ys[0]) / rows
+        aspect = min(cell_w, cell_h) / max(cell_w, cell_h)
+        if not (0.50 <= aspect <= 0.95):
+            return []
+
+        logger.info("Grid fallback: detected %d×%d grid", rows, cols)
+
+        candidates = []
+        for r in range(rows):
+            for c in range(cols):
+                y0, y1_ = ys[r], ys[r + 1]
+                x0, x1_ = xs[c], xs[c + 1]
+                cell = image[y0:y1_, x0:x1_]
+                if cell.size == 0:
+                    continue
+                bbox = (int(x0), int(y0), int(x1_ - x0), int(y1_ - y0))
+                ideal = 0.714
+                conf = max(0.0, 1.0 - abs(aspect - ideal) / ideal)
+                candidates.append((conf, bbox, cell.copy()))
+
+        return candidates
 
     # ------------------------------------------------------------------
     # BaseDetector interface
     # ------------------------------------------------------------------
 
     def detect(self, image_path: str) -> list[CardPatch]:
-        """Detect cards in the image at *image_path*.
-
-        Args:
-            image_path: Path to the source image file.
-
-        Returns:
-            List of :class:`~mtg_scanner.models.card_patch.CardPatch` objects
-            sorted by (y, x) position in the original image.
-        """
         image = load_image(image_path)
         if image is None:
             logger.error("Could not load image: %s", image_path)
@@ -228,16 +238,9 @@ class OpenCVDetector(BaseDetector):
             logger.error("Preprocessing failed for %s: %s", image_path, exc)
             return []
 
-        # RETR_LIST finds all contours including those inside merged blobs,
-        # which is essential when cards are touching or slightly overlapping.
-        contours, _ = cv2.findContours(edges, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
-        if not contours:
-            logger.info("No contours found in %s", image_path)
-            return []
-
         image_area = image.shape[0] * image.shape[1]
+        contours, _ = cv2.findContours(edges, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
 
-        # Collect all valid candidates as (confidence, bbox, warped) tuples
         candidates: list[tuple[float, tuple, np.ndarray]] = []
 
         for contour in contours:
@@ -245,24 +248,18 @@ class OpenCVDetector(BaseDetector):
             if not valid or confidence < self._confidence_threshold:
                 continue
 
-            # Approximate polygon
             peri = cv2.arcLength(contour, True)
             approx = cv2.approxPolyDP(contour, 0.02 * peri, True)
-
-            # Use the convex hull for the four-point transform if polygon has > 4 points
             if len(approx) > 4:
                 hull = cv2.convexHull(approx)
                 approx = cv2.approxPolyDP(hull, 0.02 * cv2.arcLength(hull, True), True)
-
             if len(approx) != 4:
-                # Fall back to bounding rectangle if we can't get exactly 4 corners
                 x, y, w, h = cv2.boundingRect(contour)
                 approx = np.array(
                     [[x, y], [x + w, y], [x + w, y + h], [x, y + h]], dtype=np.int32
                 ).reshape(-1, 1, 2)
 
             pts = approx.reshape(4, 2).astype(np.float32)
-
             try:
                 warped = four_point_transform(image, pts)
             except Exception as exc:
@@ -270,16 +267,20 @@ class OpenCVDetector(BaseDetector):
                 continue
 
             x, y, w, h = cv2.boundingRect(contour)
-            bbox = (int(x), int(y), int(w), int(h))
-            candidates.append((confidence, bbox, warped))
+            candidates.append((confidence, (int(x), int(y), int(w), int(h)), warped))
 
-        # NMS: sort by area descending (largest first), then suppress overlapping boxes
+        # NMS
         candidates.sort(key=lambda c: c[1][2] * c[1][3], reverse=True)
         kept: list[tuple[float, tuple, np.ndarray]] = []
         for conf, bbox, warped in candidates:
-            if any(self._iou(bbox, k[1]) > 0.3 for k in kept):
+            if any(self._iou(bbox, k[1]) > self._iou_nms_threshold for k in kept):
                 continue
             kept.append((conf, bbox, warped))
+
+        # Grid fallback when primary detection finds nothing
+        if not kept:
+            logger.info("Primary detection found 0 cards — trying grid fallback")
+            kept = self._detect_grid(image)
 
         patches: list[CardPatch] = []
         for conf, bbox, warped in kept:
@@ -292,13 +293,10 @@ class OpenCVDetector(BaseDetector):
             )
             patches.append(patch)
 
-        # Sort by top-to-bottom, left-to-right order
         patches.sort(key=lambda p: (p.bbox[1], p.bbox[0]))
-        # Re-index after sort
         for idx, patch in enumerate(patches):
             patch.patch_index = idx
 
-        # Save debug images if enabled
         if self._save_debug:
             self._save_debug_image(image_path, image, edges, patches)
 
@@ -307,7 +305,6 @@ class OpenCVDetector(BaseDetector):
 
     @staticmethod
     def _iou(b1: tuple, b2: tuple) -> float:
-        """Compute Intersection-over-Union for two (x, y, w, h) bounding boxes."""
         x1, y1, w1, h1 = b1
         x2, y2, w2, h2 = b2
         ix = max(0, min(x1 + w1, x2 + w2) - max(x1, x2))
@@ -319,28 +316,18 @@ class OpenCVDetector(BaseDetector):
     def _save_debug_image(
         self, image_path: str, image: np.ndarray, edges: np.ndarray, patches: list
     ) -> None:
-        """Save edge map and annotated detection image to output/debug/."""
         try:
             stem = Path(image_path).stem
             debug_dir = Path("output/debug")
             debug_dir.mkdir(parents=True, exist_ok=True)
-
-            # Save edge map
             cv2.imwrite(str(debug_dir / f"{stem}_edges.png"), edges)
-
-            # Save annotated image
             annotated = image.copy()
             for patch in patches:
                 x, y, w, h = patch.bbox
                 cv2.rectangle(annotated, (x, y), (x + w, y + h), (0, 255, 0), 3)
                 cv2.putText(
-                    annotated,
-                    f"#{patch.patch_index}",
-                    (x + 5, y + 30),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    1.0,
-                    (0, 255, 0),
-                    2,
+                    annotated, f"#{patch.patch_index}",
+                    (x + 5, y + 30), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 0), 2,
                 )
             cv2.imwrite(str(debug_dir / f"{stem}_detections.png"), annotated)
             logger.info("Debug images saved to %s", debug_dir)

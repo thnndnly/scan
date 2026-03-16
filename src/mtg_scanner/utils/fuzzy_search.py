@@ -15,6 +15,9 @@ _names_cache: dict[str, list[str]] = {}
 # Module-level cache for localized name→English mappings: {path -> dict}
 _mapping_cache: dict[str, dict[str, str]] = {}
 
+# Module-level cache for lowercased key lookup: {path -> {lower_key -> en_name}}
+_mapping_lower_cache: dict[str, dict[str, str]] = {}
+
 
 def load_name_mapping(path: str) -> dict[str, str]:
     """Load a localized-name → English-name mapping from a JSON file.
@@ -44,6 +47,8 @@ def load_name_mapping(path: str) -> dict[str, str]:
             logger.warning("Unexpected format in %s; expected a JSON object.", path)
             return {}
         _mapping_cache[path] = data
+        # Build lowercased key dict for O(1) exact lookups
+        _mapping_lower_cache[path] = {k.lower(): v for k, v in data.items()}
         logger.info("Loaded %d name mappings from %s", len(data), path)
         return data
     except Exception as exc:
@@ -196,12 +201,17 @@ def best_match_multilingual(
         if not mapping:
             continue
 
-        # Exact lookup (case-insensitive)
+        # Exact lookup (case-insensitive) — O(1) via lowercased dict cache
         query_lower = query.strip().lower()
-        for local_name, en_name in mapping.items():
-            if local_name.lower() == query_lower:
-                logger.info("Multilingual exact match: %r → %r (%s)", query, en_name, path)
-                return en_name, 1.0
+        lower_mapping = _mapping_lower_cache.get(path)
+        if lower_mapping is None:
+            # Build cache lazily if mapping was loaded before this cache existed
+            lower_mapping = {k.lower(): v for k, v in mapping.items()}
+            _mapping_lower_cache[path] = lower_mapping
+        en_name_exact = lower_mapping.get(query_lower)
+        if en_name_exact is not None:
+            logger.info("Multilingual exact match: %r → %r (%s)", query, en_name_exact, path)
+            return en_name_exact, 1.0
 
         # Fuzzy match against localized keys
         local_names = list(mapping.keys())

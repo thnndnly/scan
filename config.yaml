@@ -4,8 +4,10 @@ detection:
   confidence_threshold: 0.5
   aspect_ratio_min: 0.60
   aspect_ratio_max: 0.85
-  min_card_area_px: 2000
-  save_debug: false
+  min_card_area_px: 5000
+  iou_nms_threshold: 0.3
+  max_card_area_frac: 0.50
+  save_debug: true
 
 recognition:
   primary_method: ocr
@@ -23,6 +25,7 @@ scryfall:
   cache_ttl_hours: 24
   rate_limit_ms: 110
   cache_db_path: data/scryfall_cache.db
+  prefer_local: true   # Lokalen Katalog vor API nutzen (kein Internet nötig)
 
 output:
   default_format: both
@@ -48,3 +51,20 @@ catalog:
   enabled: true
   db_path: data/card_catalog.db
   bulk_type: default_cards
+
+collection:
+  db_path: data/collection.db
+
+wishlist:
+  db_path: data/wishlist.db
+
+claude:
+  model: claude-sonnet-4-6
+  names_file: data/card_names.json
+  fuzzy_cutoff: 80.0
+
+clip:
+  db_path: data/clip_embeddings.db
+  model_name: openai/clip-vit-base-patch32
+  similarity_threshold: 0.25
+  top_k: 5

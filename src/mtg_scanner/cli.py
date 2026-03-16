@@ -179,6 +179,27 @@ Wichtige Einstellungen:
   archive.jpeg_quality         Komprimierungsqualität 10-95 (Standard: 70)
   catalog.db_path              Pfad zur Karten-Katalog-DB
 """,
+        "collection": """\
+COLLECTION — Persönliche Kartensammlung verwalten
+
+  mtg-scan collection stats                    Statistiken anzeigen
+  mtg-scan collection list                     Alle Karten auflisten
+  mtg-scan collection list --name "Bolt"       Nach Name filtern
+  mtg-scan collection list --set m21           Nach Set filtern
+  mtg-scan collection add --scryfall-id UUID --name "Lightning Bolt" --set-code lea
+  mtg-scan collection add ... --foil --qty 2 --condition LP --buy-price 4.50
+  mtg-scan collection remove 42                Eintrag #42 entfernen
+  mtg-scan collection export                   Generisches CSV
+  mtg-scan collection export --format moxfield output/moxfield.csv
+  mtg-scan collection export --format tcgplayer
+  mtg-scan collection export --format cardmarket
+  mtg-scan collection export --format arena output/arena.dek
+
+Zustände: NM (Near Mint), LP (Lightly Played), MP (Moderately Played),
+          HP (Heavily Played), DMG (Damaged)
+
+Datenbank: data/collection.db
+""",
         "catalog": """\
 CATALOG — Lokaler Karten-Katalog (Scryfall Bulk-Daten)
 
@@ -364,21 +385,24 @@ def db_update_names(verbose: bool) -> None:
 @db_group.command("build-hashes")
 @click.option("--sets", default=None, help="Comma-separated set codes to include.")
 @click.option("--limit", default=None, type=int, help="Maximum number of cards to process.")
+@click.option("--dry-run", is_flag=True, default=False, help="Preview scope and time estimate without downloading.")
 @click.option("--verbose", "-v", is_flag=True)
-def db_build_hashes(sets: str | None, limit: int | None, verbose: bool) -> None:
+def db_build_hashes(sets: str | None, limit: int | None, dry_run: bool, verbose: bool) -> None:
     """Build the perceptual hash database from Scryfall card images."""
     _setup_logging(verbose)
     click.echo("Building hash database…")
     try:
         import subprocess
 
-        scripts_dir = Path(__file__).parent.parent.parent.parent / "scripts"
+        scripts_dir = Path(__file__).parent.parent.parent / "scripts"
         script = str(scripts_dir / "build_hash_db.py")
         args = [sys.executable, script]
         if sets:
             args += ["--sets", sets]
         if limit is not None:
             args += ["--limit", str(limit)]
+        if dry_run:
+            args += ["--dry-run"]
         result = subprocess.run(args, check=False)
         sys.exit(result.returncode)
     except Exception as exc:
@@ -407,7 +431,7 @@ def db_stats(verbose: bool) -> None:
     click.echo(f"  Expired entries: {stats['expired_entries']}")
 
     # Hash DB stats
-    hash_db = cfg.scryfall.cache_db_path.replace("scryfall_cache.db", "card_hashes.db")
+    hash_db = cfg.recognition.hash_db_path
     if Path(hash_db).exists():
         import sqlite3
 
@@ -430,6 +454,105 @@ def db_stats(verbose: bool) -> None:
         click.echo(f"\nCard names (data/card_names.json): {n} entries")
     else:
         click.echo("\nCard names file not found (data/card_names.json).")
+
+    # CLIP embedding DB
+    import sqlite3 as _sqlite3
+    clip_db = Path("data/clip_embeddings.db")
+    if clip_db.exists():
+        conn = _sqlite3.connect(str(clip_db))
+        count = conn.execute("SELECT COUNT(*) FROM clip_embeddings").fetchone()[0]
+        conn.close()
+        click.echo(f"\nCLIP embedding DB ({clip_db}): {count} embeddings")
+    else:
+        click.echo(f"\nCLIP embedding DB not found (run: mtg-scan db build-clip).")
+
+
+@db_group.command("build-clip")
+@click.option("--sets", default=None, help="Comma-separated Scryfall set codes (e.g. m21,lea).")
+@click.option("--limit", default=None, type=int, help="Maximum number of cards to embed.")
+@click.option("--lang", multiple=True, default=["en"], show_default=True, help="Language codes.")
+@click.option("--db-path", default="data/clip_embeddings.db", show_default=True)
+@click.option("--dry-run", is_flag=True, help="Show stats without downloading.")
+@click.option("--verbose", "-v", is_flag=True)
+def db_build_clip(
+    sets: str | None,
+    limit: int | None,
+    lang: tuple[str, ...],
+    db_path: str,
+    dry_run: bool,
+    verbose: bool,
+) -> None:
+    """Build the CLIP embedding database for artwork-based recognition."""
+    _setup_logging(verbose)
+    try:
+        import subprocess
+
+        scripts_dir = Path(__file__).parent.parent.parent.parent / "scripts"
+        script = str(scripts_dir / "build_clip_db.py")
+        args = [sys.executable, script, "--db-path", db_path]
+        if sets:
+            args += ["--sets", sets]
+        if limit is not None:
+            args += ["--limit", str(limit)]
+        for lc in lang:
+            args += ["--lang", lc]
+        if dry_run:
+            args.append("--dry-run")
+        result = subprocess.run(args, check=False)
+        sys.exit(result.returncode)
+    except Exception as exc:
+        click.echo(f"Error: {exc}", err=True)
+        sys.exit(1)
+
+
+@db_group.command("train-yolo")
+@click.option("--base-model", default="yolov8n.pt", show_default=True)
+@click.option("--epochs", default=100, show_default=True, type=int)
+@click.option("--imgsz", default=640, show_default=True, type=int)
+@click.option("--batch", default=16, show_default=True, type=int)
+@click.option("--output-model", default="data/models/yolo_mtg.pt", show_default=True)
+@click.option("--dataset-db", default="data/dataset.db", show_default=True)
+@click.option("--val-split", default=0.15, show_default=True, type=float)
+@click.option("--min-confidence", default=0.0, show_default=True, type=float)
+@click.option("--dry-run", is_flag=True, help="Show dataset stats without training.")
+@click.option("--verbose", "-v", is_flag=True)
+def db_train_yolo(
+    base_model: str,
+    epochs: int,
+    imgsz: int,
+    batch: int,
+    output_model: str,
+    dataset_db: str,
+    val_split: float,
+    min_confidence: float,
+    dry_run: bool,
+    verbose: bool,
+) -> None:
+    """Fine-tune YOLOv8 on validated patches from the dataset DB."""
+    _setup_logging(verbose)
+    try:
+        import subprocess
+
+        scripts_dir = Path(__file__).parent.parent.parent.parent / "scripts"
+        script = str(scripts_dir / "train_yolo.py")
+        args = [
+            sys.executable, script,
+            "--base-model", base_model,
+            "--epochs", str(epochs),
+            "--imgsz", str(imgsz),
+            "--batch", str(batch),
+            "--output-model", output_model,
+            "--dataset-db", dataset_db,
+            "--val-split", str(val_split),
+            "--min-confidence", str(min_confidence),
+        ]
+        if dry_run:
+            args.append("--dry-run")
+        result = subprocess.run(args, check=False)
+        sys.exit(result.returncode)
+    except Exception as exc:
+        click.echo(f"Error: {exc}", err=True)
+        sys.exit(1)
 
 
 # ---------------------------------------------------------------------------
@@ -989,6 +1112,509 @@ def catalog_search(name: str, limit: int, verbose: bool) -> None:
             f"({finishes})  "
             f"{c.get('released_at','?')[:4]}"
         )
+
+
+# ---------------------------------------------------------------------------
+# collection command group
+# ---------------------------------------------------------------------------
+
+
+@cli.group("collection", context_settings=CONTEXT_SETTINGS)
+def collection_group() -> None:
+    """Eigene Kartensammlung verwalten.
+
+    \b
+    Befehle:
+      stats    Statistiken der Sammlung
+      list     Karten auflisten (optional gefiltert)
+      add      Karte zur Sammlung hinzufügen
+      remove   Eintrag aus der Sammlung entfernen
+      export   Sammlung exportieren (Moxfield, TCGplayer, Cardmarket, Arena, CSV)
+    """
+
+
+@collection_group.command("help", hidden=False)
+@click.pass_context
+def collection_help(ctx: click.Context) -> None:
+    """Hilfe zu collection-Befehlen anzeigen."""
+    click.echo(ctx.parent.get_help())
+
+
+@collection_group.command("stats")
+@click.option("--verbose", "-v", is_flag=True)
+def collection_stats(verbose: bool) -> None:
+    """Statistiken der Kartensammlung anzeigen."""
+    _setup_logging(verbose)
+    from mtg_scanner.collection import CollectionManager
+    from mtg_scanner.config import get_config
+
+    cfg = get_config()
+    db_path = cfg.collection.db_path
+    col = CollectionManager(db_path=db_path)
+    s = col.stats()
+    col.close()
+
+    click.echo("Sammlungs-Statistiken:")
+    click.echo(f"  Einträge gesamt    : {s['total_entries']}")
+    click.echo(f"  Karten gesamt      : {s['total_cards']}")
+    click.echo(f"  Einzigartige Karten: {s['unique_cards']}")
+    click.echo(f"  Davon Foil         : {s['foil_count']}")
+    click.echo(f"  Kaufwert gesamt    : €{s['total_value_eur']:.2f}")
+    click.echo(f"  Marktwert (EUR)    : €{s['market_value_eur']:.2f}")
+    click.echo(f"  Preishistorie-Tage : {s['price_history_days']}")
+    if s["by_condition"]:
+        click.echo("  Nach Zustand:")
+        for cond, cnt in sorted(s["by_condition"].items()):
+            click.echo(f"    {cond:<4}: {cnt}")
+    click.echo(f"  Datenbank          : {s['db_path']}")
+
+
+@collection_group.command("list")
+@click.option("--name", default="", help="Namensfilter (Teilstring).")
+@click.option("--set", "set_code", default="", help="Set-Code-Filter (z.B. m21).")
+@click.option("--limit", default=100, show_default=True, help="Maximale Treffer.")
+@click.option("--verbose", "-v", is_flag=True)
+def collection_list(name: str, set_code: str, limit: int, verbose: bool) -> None:
+    """Karten der Sammlung auflisten."""
+    _setup_logging(verbose)
+    from mtg_scanner.collection import CollectionManager
+    from mtg_scanner.config import get_config
+
+    cfg = get_config()
+    col = CollectionManager(db_path=cfg.collection.db_path)
+    entries = col.get_collection(name_filter=name, set_filter=set_code, limit=limit)
+    col.close()
+
+    if not entries:
+        click.echo("Keine Einträge gefunden.")
+        return
+
+    click.echo(f"{'ID':>4}  {'Qty':>3}  {'Cond':<4}  {'Foil':<4}  "
+               f"{'Set':>4}  {'Nr.':>4}  Name")
+    click.echo("—" * 72)
+    for e in entries:
+        foil = "✓" if e["foil"] else ""
+        click.echo(
+            f"{e['id']:>4}  {e['quantity']:>3}x  {e['condition']:<4}  "
+            f"{foil:<4}  {(e['set_code'] or '').upper():>4}  "
+            f"{(e['collector_number'] or ''):>4}  {e['name']}"
+        )
+    click.echo(f"\n{len(entries)} Einträge.")
+
+
+@collection_group.command("add")
+@click.option("--scryfall-id", required=True, help="Scryfall-UUID der Karte.")
+@click.option("--name", required=True, help="Kartenname.")
+@click.option("--oracle-id", default="", help="Oracle-ID.")
+@click.option("--set-code", default="", help="Set-Code (z.B. m21).")
+@click.option("--set-name", default="", help="Set-Name.")
+@click.option("--collector-number", default="", help="Collector-Nummer.")
+@click.option("--lang", default="en", show_default=True, help="Sprachcode.")
+@click.option("--foil", is_flag=True, default=False, help="Foil-Karte.")
+@click.option(
+    "--condition",
+    default="NM",
+    show_default=True,
+    type=click.Choice(["NM", "LP", "MP", "HP", "DMG"], case_sensitive=False),
+    help="Zustand.",
+)
+@click.option("--qty", default=1, show_default=True, help="Anzahl.")
+@click.option("--buy-price", default=None, type=float, help="Kaufpreis in EUR.")
+@click.option("--buy-date", default=None, help="Kaufdatum (YYYY-MM-DD).")
+@click.option("--notes", default="", help="Notizen.")
+@click.option("--verbose", "-v", is_flag=True)
+def collection_add(
+    scryfall_id: str,
+    name: str,
+    oracle_id: str,
+    set_code: str,
+    set_name: str,
+    collector_number: str,
+    lang: str,
+    foil: bool,
+    condition: str,
+    qty: int,
+    buy_price: float | None,
+    buy_date: str | None,
+    notes: str,
+    verbose: bool,
+) -> None:
+    """Karte zur Sammlung hinzufügen (oder Anzahl erhöhen wenn bereits vorhanden)."""
+    _setup_logging(verbose)
+    from mtg_scanner.collection import CollectionManager
+    from mtg_scanner.config import get_config
+
+    cfg = get_config()
+    col = CollectionManager(db_path=cfg.collection.db_path)
+    entry_id = col.add_card(
+        scryfall_id=scryfall_id,
+        name=name,
+        oracle_id=oracle_id,
+        set_code=set_code,
+        set_name=set_name,
+        collector_number=collector_number,
+        lang=lang,
+        foil=foil,
+        condition=condition,
+        quantity=qty,
+        buy_price=buy_price,
+        buy_date=buy_date,
+        notes=notes,
+    )
+    col.close()
+    foil_str = " (Foil)" if foil else ""
+    click.echo(f"Hinzugefügt: {qty}x {name}{foil_str} [{condition}] → Eintrag #{entry_id}")
+
+
+@collection_group.command("remove")
+@click.argument("entry_id", type=int)
+@click.option("--verbose", "-v", is_flag=True)
+def collection_remove(entry_id: int, verbose: bool) -> None:
+    """Eintrag aus der Sammlung entfernen (anhand der Eintrag-ID)."""
+    _setup_logging(verbose)
+    from mtg_scanner.collection import CollectionManager
+    from mtg_scanner.config import get_config
+
+    cfg = get_config()
+    col = CollectionManager(db_path=cfg.collection.db_path)
+    entry = col.get_entry(entry_id)
+    if entry is None:
+        click.echo(f"Eintrag #{entry_id} nicht gefunden.", err=True)
+        col.close()
+        sys.exit(1)
+    ok = col.remove_card(entry_id)
+    col.close()
+    if ok:
+        click.echo(f"Eintrag #{entry_id} ({entry['name']}) entfernt.")
+    else:
+        click.echo(f"Eintrag #{entry_id} konnte nicht entfernt werden.", err=True)
+        sys.exit(1)
+
+
+@collection_group.command("price-update")
+@click.option("--verbose", "-v", is_flag=True)
+def collection_price_update(verbose: bool) -> None:
+    """Aktuelle Preise für alle Sammlungskarten aus dem lokalen Katalog holen.
+
+    \b
+    Benötigt: mtg-scan catalog build (einmalig)
+    Schreibt täglich einen neuen Preis-Datenpunkt pro Karte.
+    """
+    _setup_logging(verbose)
+    from mtg_scanner.collection import CollectionManager
+    from mtg_scanner.config import get_config
+    from mtg_scanner.lookup.card_catalog import CardCatalog
+
+    cfg = get_config()
+    if not Path(cfg.catalog.db_path).exists():
+        click.echo("Kein Katalog gefunden. Bitte zuerst: mtg-scan catalog build", err=True)
+        sys.exit(1)
+
+    col = CollectionManager(db_path=cfg.collection.db_path)
+    cat = CardCatalog(db_path=cfg.catalog.db_path)
+    click.echo("Preise werden aktualisiert…")
+    inserted = col.update_prices_from_catalog(cat)
+    cat.close()
+    s = col.stats()
+    col.close()
+    click.echo(f"{inserted} neue Preisdatenpunkte gespeichert.")
+    click.echo(f"Aktueller Marktwert (EUR): €{s['market_value_eur']:.2f}")
+
+
+@collection_group.command("export")
+@click.argument("path", default=None, required=False)
+@click.option(
+    "--format",
+    "-f",
+    "fmt",
+    type=click.Choice(["moxfield", "tcgplayer", "cardmarket", "arena", "csv"],
+                      case_sensitive=False),
+    default="csv",
+    show_default=True,
+    help="Exportformat.",
+)
+@click.option("--verbose", "-v", is_flag=True)
+def collection_export(path: str | None, fmt: str, verbose: bool) -> None:
+    """Sammlung exportieren.
+
+    \b
+    Formate:
+      moxfield   CSV für Moxfield / Archidekt
+      tcgplayer  CSV für TCGplayer
+      cardmarket CSV für Cardmarket
+      arena      MTG-Arena-Format (.dek)
+      csv        Generisches CSV (Standard)
+
+    \b
+    Beispiele:
+      mtg-scan collection export --format moxfield output/moxfield.csv
+      mtg-scan collection export --format arena output/arena.dek
+    """
+    _setup_logging(verbose)
+    from mtg_scanner.collection import CollectionManager
+    from mtg_scanner.config import get_config
+
+    cfg = get_config()
+    col = CollectionManager(db_path=cfg.collection.db_path)
+
+    ext_map = {"moxfield": "csv", "tcgplayer": "csv", "cardmarket": "csv",
+               "arena": "dek", "csv": "csv"}
+    dest = path or f"output/collection_{fmt}.{ext_map[fmt]}"
+
+    export_fn = {
+        "moxfield": col.export_moxfield,
+        "tcgplayer": col.export_tcgplayer,
+        "cardmarket": col.export_cardmarket,
+        "arena": col.export_arena,
+        "csv": col.export_csv,
+    }[fmt]
+
+    count = export_fn(dest)
+    col.close()
+    click.echo(f"{count} Einträge als {fmt.capitalize()} exportiert nach: {dest}")
+
+
+# ---------------------------------------------------------------------------
+# wishlist command group
+# ---------------------------------------------------------------------------
+
+
+@cli.group("wishlist", context_settings=CONTEXT_SETTINGS)
+def wishlist_group() -> None:
+    """Wunschliste und Tauschbörse verwalten.
+
+    \b
+    Befehle:
+      stats         Statistiken beider Listen
+      want-add      Karte zur Wunschliste hinzufügen
+      want-list     Wunschliste anzeigen
+      want-remove   Eintrag aus Wunschliste entfernen
+      have-add      Karte zur Tauschbörse hinzufügen
+      have-list     Tauschbörse anzeigen
+      have-remove   Eintrag aus Tauschbörse entfernen
+      compare       Wunschliste mit Sammlung abgleichen
+      export        Beide Listen als CSV exportieren
+    """
+
+
+@wishlist_group.command("help", hidden=False)
+@click.pass_context
+def wishlist_help(ctx: click.Context) -> None:
+    """Hilfe zu wishlist-Befehlen anzeigen."""
+    click.echo(ctx.parent.get_help())
+
+
+@wishlist_group.command("stats")
+@click.option("--verbose", "-v", is_flag=True)
+def wishlist_stats(verbose: bool) -> None:
+    """Statistiken der Wunschliste und Tauschbörse."""
+    _setup_logging(verbose)
+    from mtg_scanner.config import get_config
+    from mtg_scanner.wishlist import WishlistManager
+
+    cfg = get_config()
+    wl = WishlistManager(db_path=cfg.wishlist.db_path)
+    s = wl.stats()
+    wl.close()
+    click.echo("Wunschliste / Tauschbörse:")
+    click.echo(f"  Wunschliste Einträge : {s['want_entries']}")
+    click.echo(f"  Wunschliste Karten   : {s['want_cards']}")
+    click.echo(f"  Tauschbörse Einträge : {s['have_entries']}")
+    click.echo(f"  Tauschbörse Karten   : {s['have_cards']}")
+    click.echo(f"  Datenbank            : {s['db_path']}")
+
+
+@wishlist_group.command("want-add")
+@click.option("--name", required=True, help="Kartenname.")
+@click.option("--scryfall-id", default="", help="Scryfall-UUID (optional).")
+@click.option("--set-code", default="", help="Set-Code (optional).")
+@click.option("--foil", is_flag=True, default=False)
+@click.option("--condition", default="NM",
+              type=click.Choice(["NM", "LP", "MP", "HP", "DMG"], case_sensitive=False))
+@click.option("--qty", default=1, show_default=True)
+@click.option("--max-price", default=None, type=float, help="Maximaler Kaufpreis EUR.")
+@click.option("--priority", default=2, show_default=True,
+              type=click.Choice(["1", "2", "3"]), help="Priorität: 1=Hoch 2=Mittel 3=Niedrig.")
+@click.option("--notes", default="")
+@click.option("--verbose", "-v", is_flag=True)
+def wishlist_want_add(name, scryfall_id, set_code, foil, condition,
+                      qty, max_price, priority, notes, verbose):
+    """Karte zur Wunschliste hinzufügen."""
+    _setup_logging(verbose)
+    from mtg_scanner.config import get_config
+    from mtg_scanner.wishlist import WishlistManager
+
+    cfg = get_config()
+    wl = WishlistManager(db_path=cfg.wishlist.db_path)
+    eid = wl.add_want(
+        name=name, scryfall_id=scryfall_id, set_code=set_code,
+        foil=foil, condition=condition, quantity=qty,
+        max_price_eur=max_price, priority=int(priority), notes=notes,
+    )
+    wl.close()
+    foil_str = " (Foil)" if foil else ""
+    click.echo(f"Zur Wunschliste hinzugefügt: {qty}x {name}{foil_str} → Eintrag #{eid}")
+
+
+@wishlist_group.command("want-list")
+@click.option("--name", default="", help="Namensfilter.")
+@click.option("--verbose", "-v", is_flag=True)
+def wishlist_want_list(name, verbose):
+    """Wunschliste anzeigen."""
+    _setup_logging(verbose)
+    from mtg_scanner.config import get_config
+    from mtg_scanner.wishlist import WishlistManager, PRIORITIES
+
+    cfg = get_config()
+    wl = WishlistManager(db_path=cfg.wishlist.db_path)
+    entries = wl.get_want_list(name_filter=name)
+    wl.close()
+    if not entries:
+        click.echo("Wunschliste ist leer.")
+        return
+    click.echo(f"{'ID':>4}  {'Qty':>3}  {'Prio':<6}  {'Cond':<4}  {'Foil':<4}  Name")
+    click.echo("—" * 60)
+    for e in entries:
+        foil = "✓" if e["foil"] else ""
+        prio = PRIORITIES.get(e["priority"], str(e["priority"]))
+        click.echo(f"{e['id']:>4}  {e['quantity_wanted']:>3}x  {prio:<6}  "
+                   f"{e['condition']:<4}  {foil:<4}  {e['name']}")
+
+
+@wishlist_group.command("want-remove")
+@click.argument("entry_id", type=int)
+@click.option("--verbose", "-v", is_flag=True)
+def wishlist_want_remove(entry_id, verbose):
+    """Eintrag aus der Wunschliste entfernen."""
+    _setup_logging(verbose)
+    from mtg_scanner.config import get_config
+    from mtg_scanner.wishlist import WishlistManager
+
+    cfg = get_config()
+    wl = WishlistManager(db_path=cfg.wishlist.db_path)
+    ok = wl.remove_want(entry_id)
+    wl.close()
+    click.echo(f"Eintrag #{entry_id} {'entfernt' if ok else 'nicht gefunden'}.")
+
+
+@wishlist_group.command("have-add")
+@click.option("--name", required=True)
+@click.option("--scryfall-id", default="")
+@click.option("--set-code", default="")
+@click.option("--collector-number", default="")
+@click.option("--foil", is_flag=True, default=False)
+@click.option("--condition", default="NM",
+              type=click.Choice(["NM", "LP", "MP", "HP", "DMG"], case_sensitive=False))
+@click.option("--qty", default=1, show_default=True)
+@click.option("--ask-price", default=None, type=float, help="Wunschpreis EUR.")
+@click.option("--notes", default="")
+@click.option("--verbose", "-v", is_flag=True)
+def wishlist_have_add(name, scryfall_id, set_code, collector_number,
+                      foil, condition, qty, ask_price, notes, verbose):
+    """Karte zur Tauschbörse hinzufügen."""
+    _setup_logging(verbose)
+    from mtg_scanner.config import get_config
+    from mtg_scanner.wishlist import WishlistManager
+
+    cfg = get_config()
+    wl = WishlistManager(db_path=cfg.wishlist.db_path)
+    eid = wl.add_have(
+        name=name, scryfall_id=scryfall_id, set_code=set_code,
+        collector_number=collector_number, foil=foil, condition=condition,
+        quantity=qty, ask_price_eur=ask_price, notes=notes,
+    )
+    wl.close()
+    click.echo(f"Zur Tauschbörse hinzugefügt: {qty}x {name} → Eintrag #{eid}")
+
+
+@wishlist_group.command("have-list")
+@click.option("--name", default="")
+@click.option("--verbose", "-v", is_flag=True)
+def wishlist_have_list(name, verbose):
+    """Tauschbörse anzeigen."""
+    _setup_logging(verbose)
+    from mtg_scanner.config import get_config
+    from mtg_scanner.wishlist import WishlistManager
+
+    cfg = get_config()
+    wl = WishlistManager(db_path=cfg.wishlist.db_path)
+    entries = wl.get_have_list(name_filter=name)
+    wl.close()
+    if not entries:
+        click.echo("Tauschbörse ist leer.")
+        return
+    click.echo(f"{'ID':>4}  {'Qty':>3}  {'Cond':<4}  {'Foil':<4}  {'Set':>4}  Name")
+    click.echo("—" * 60)
+    for e in entries:
+        foil = "✓" if e["foil"] else ""
+        click.echo(f"{e['id']:>4}  {e['quantity']:>3}x  {e['condition']:<4}  "
+                   f"{foil:<4}  {(e['set_code'] or '').upper():>4}  {e['name']}")
+
+
+@wishlist_group.command("have-remove")
+@click.argument("entry_id", type=int)
+@click.option("--verbose", "-v", is_flag=True)
+def wishlist_have_remove(entry_id, verbose):
+    """Eintrag aus der Tauschbörse entfernen."""
+    _setup_logging(verbose)
+    from mtg_scanner.config import get_config
+    from mtg_scanner.wishlist import WishlistManager
+
+    cfg = get_config()
+    wl = WishlistManager(db_path=cfg.wishlist.db_path)
+    ok = wl.remove_have(entry_id)
+    wl.close()
+    click.echo(f"Eintrag #{entry_id} {'entfernt' if ok else 'nicht gefunden'}.")
+
+
+@wishlist_group.command("compare")
+@click.option("--verbose", "-v", is_flag=True)
+def wishlist_compare(verbose):
+    """Wunschliste mit Sammlung abgleichen — was fehlt noch?"""
+    _setup_logging(verbose)
+    from mtg_scanner.collection import CollectionManager
+    from mtg_scanner.config import get_config
+    from mtg_scanner.wishlist import WishlistManager
+
+    cfg = get_config()
+    wl = WishlistManager(db_path=cfg.wishlist.db_path)
+    col = CollectionManager(db_path=cfg.collection.db_path)
+    results = wl.compare_want_vs_collection(col)
+    col.close()
+    wl.close()
+
+    if not results:
+        click.echo("Wunschliste ist leer.")
+        return
+
+    click.echo(f"{'Name':<35}  {'Prio':<6}  {'Gewünscht':>9}  {'Besitz':>6}  {'Fehlt':>5}")
+    click.echo("—" * 70)
+    for r in results:
+        click.echo(
+            f"{r['name'][:34]:<35}  {r['priority']:<6}  "
+            f"{r['quantity_wanted']:>9}  {r['quantity_owned']:>6}  {r['still_missing']:>5}"
+        )
+    missing = sum(r["still_missing"] for r in results)
+    click.echo(f"\n{missing} Karten noch gesucht.")
+
+
+@wishlist_group.command("export")
+@click.option("--want-path", default="output/want_list.csv", show_default=True)
+@click.option("--have-path", default="output/have_list.csv", show_default=True)
+@click.option("--verbose", "-v", is_flag=True)
+def wishlist_export(want_path, have_path, verbose):
+    """Wunschliste und Tauschbörse als CSV exportieren."""
+    _setup_logging(verbose)
+    from mtg_scanner.config import get_config
+    from mtg_scanner.wishlist import WishlistManager
+
+    cfg = get_config()
+    wl = WishlistManager(db_path=cfg.wishlist.db_path)
+    w = wl.export_want_list(want_path)
+    h = wl.export_have_list(have_path)
+    wl.close()
+    click.echo(f"Wunschliste: {w} Einträge → {want_path}")
+    click.echo(f"Tauschbörse: {h} Einträge → {have_path}")
 
 
 # ---------------------------------------------------------------------------

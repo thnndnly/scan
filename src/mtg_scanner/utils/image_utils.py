@@ -12,8 +12,45 @@ import numpy as np
 logger = logging.getLogger(__name__)
 
 
+# EXIF Orientation tag value → cv2 rotation constant
+_EXIF_ORIENTATION_TAG = 274
+_EXIF_TO_CV2_ROTATION = {
+    3: cv2.ROTATE_180,
+    6: cv2.ROTATE_90_CLOCKWISE,
+    8: cv2.ROTATE_90_COUNTERCLOCKWISE,
+}
+
+
+def _correct_exif_rotation(img: np.ndarray, path: str) -> np.ndarray:
+    """Rotate *img* to match its EXIF orientation tag (if any).
+
+    Opens *path* with Pillow only to read EXIF metadata — no second full decode.
+
+    Args:
+        img: Already-decoded BGR image.
+        path: Original file path (used to read EXIF).
+
+    Returns:
+        Rotated image, or *img* unchanged when no correction is needed.
+    """
+    try:
+        from PIL import Image as _PILImage
+        with _PILImage.open(path) as pil_img:
+            exif = pil_img.getexif()
+            orientation = exif.get(_EXIF_ORIENTATION_TAG, 1)
+        rotation = _EXIF_TO_CV2_ROTATION.get(orientation)
+        if rotation is not None:
+            return cv2.rotate(img, rotation)
+    except Exception:
+        pass
+    return img
+
+
 def load_image(path: str) -> Optional[np.ndarray]:
     """Load an image from *path* using OpenCV, with Pillow fallback for AVIF/HEIC.
+
+    EXIF orientation is automatically applied so rotated phone photos are
+    returned upright.
 
     Args:
         path: Filesystem path to the image file.
@@ -24,12 +61,13 @@ def load_image(path: str) -> Optional[np.ndarray]:
     try:
         img = cv2.imread(path)
         if img is not None:
-            return img
+            return _correct_exif_rotation(img, path)
         # OpenCV returned None — try Pillow (handles AVIF, HEIC, etc.)
         logger.debug("cv2.imread returned None for %s, trying Pillow fallback", path)
         try:
-            from PIL import Image as _PILImage
+            from PIL import Image as _PILImage, ImageOps as _ImageOps
             with _PILImage.open(path) as pil_img:
+                pil_img = _ImageOps.exif_transpose(pil_img)
                 pil_img = pil_img.convert("RGB")
                 return cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
         except Exception as pil_exc:

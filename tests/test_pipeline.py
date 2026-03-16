@@ -58,13 +58,17 @@ def _build_pipeline_with_mocks(
     primary = MagicMock()
     primary.recognize.side_effect = recognition_results
 
+    # Fallback must also be a mock so real HashRecognizer/OCR are never invoked
+    fallback = MagicMock()
+    fallback.recognize.return_value = (None, 0.0)
+
     scryfall = MagicMock()
     scryfall.lookup.return_value = card_data
 
     return Pipeline(
         detector=detector,
         primary_recognizer=primary,
-        fallback_recognizer=None,
+        fallback_recognizer=fallback,
         scryfall_client=scryfall,
         save_patches=False,
     )

@@ -10,6 +10,7 @@ from __future__ import annotations
 import csv
 import logging
 import sqlite3
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
@@ -81,6 +82,10 @@ CREATE TABLE IF NOT EXISTS results (
 CREATE INDEX IF NOT EXISTS idx_detections_scan_id ON detections(scan_id);
 CREATE INDEX IF NOT EXISTS idx_attempts_detection_id ON recognition_attempts(detection_id);
 CREATE INDEX IF NOT EXISTS idx_results_detection_id ON results(detection_id);
+CREATE INDEX IF NOT EXISTS idx_results_card_name ON results(card_name);
+CREATE INDEX IF NOT EXISTS idx_results_recognition_method ON results(recognition_method);
+CREATE INDEX IF NOT EXISTS idx_results_confidence ON results(confidence);
+CREATE INDEX IF NOT EXISTS idx_scans_scan_timestamp ON scans(scan_timestamp);
 """
 
 
@@ -96,9 +101,13 @@ class DatasetLogger:
     def __init__(self, db_path: str, save_patches: bool = True) -> None:
         self._db_path = Path(db_path)
         self._save_patches = save_patches
+        self._lock = threading.Lock()
+        self._batch_mode = False
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(str(self._db_path), check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
+        self._conn.execute("PRAGMA foreign_keys = ON")
+        self._conn.execute("PRAGMA journal_mode = WAL")
         self._conn.executescript(_DDL)
         self._conn.commit()
         self._migrate()
@@ -109,11 +118,46 @@ class DatasetLogger:
 
     def _migrate(self) -> None:
         """Add new columns to existing databases if they don't exist yet."""
-        existing = {row[1] for row in self._conn.execute("PRAGMA table_info(results)").fetchall()}
+        results_cols = {row[1] for row in self._conn.execute("PRAGMA table_info(results)").fetchall()}
         for col, typedef in [("scryfall_id", "TEXT"), ("oracle_id", "TEXT")]:
-            if col not in existing:
+            if col not in results_cols:
                 self._conn.execute(f"ALTER TABLE results ADD COLUMN {col} {typedef}")
+
+        scans_cols = {row[1] for row in self._conn.execute("PRAGMA table_info(scans)").fetchall()}
+        if "corrected_count" not in scans_cols:
+            self._conn.execute("ALTER TABLE scans ADD COLUMN corrected_count INTEGER")
+
+        det_cols = {row[1] for row in self._conn.execute("PRAGMA table_info(detections)").fetchall()}
+        if "detection_approved" not in det_cols:
+            self._conn.execute("ALTER TABLE detections ADD COLUMN detection_approved INTEGER")
+
+        if "reviewed" not in scans_cols:
+            self._conn.execute("ALTER TABLE scans ADD COLUMN reviewed INTEGER DEFAULT 0")
+
         self._conn.commit()
+
+    def _maybe_commit(self) -> None:
+        """Commit unless we are inside a batch transaction."""
+        if not self._batch_mode:
+            self._conn.commit()
+
+    def begin_batch(self) -> None:
+        """Start a batch transaction — individual write methods skip their commit.
+
+        Call :meth:`commit_batch` or :meth:`rollback_batch` to finalise.
+        The caller must hold ``self._lock`` for the duration of the batch.
+        """
+        self._batch_mode = True
+
+    def commit_batch(self) -> None:
+        """Commit all pending writes and leave batch mode."""
+        self._batch_mode = False
+        self._conn.commit()
+
+    def rollback_batch(self) -> None:
+        """Roll back all pending writes and leave batch mode."""
+        self._batch_mode = False
+        self._conn.rollback()
 
     def _now(self) -> str:
         return datetime.now(timezone.utc).isoformat()
@@ -138,13 +182,14 @@ class DatasetLogger:
         """
         height = image_shape[0] if len(image_shape) >= 1 else None
         width = image_shape[1] if len(image_shape) >= 2 else None
-        cur = self._conn.execute(
-            "INSERT INTO scans (image_path, scan_timestamp, image_width, image_height) "
-            "VALUES (?, ?, ?, ?)",
-            (image_path, self._now(), width, height),
-        )
-        self._conn.commit()
-        return cur.lastrowid  # type: ignore[return-value]
+        with self._lock:
+            cur = self._conn.execute(
+                "INSERT INTO scans (image_path, scan_timestamp, image_width, image_height) "
+                "VALUES (?, ?, ?, ?)",
+                (image_path, self._now(), width, height),
+            )
+            self._maybe_commit()
+            return cur.lastrowid  # type: ignore[return-value]
 
     def log_detection(self, scan_id: int, patch: "CardPatch") -> int:
         """Insert a detection record, optionally save patch PNG, return ``detection_id``.
@@ -161,16 +206,17 @@ class DatasetLogger:
             patch_image_path = self._save_patch_image(scan_id, patch)
 
         x, y, w, h = patch.bbox
-        cur = self._conn.execute(
-            "INSERT INTO detections "
-            "(scan_id, patch_index, bbox_x, bbox_y, bbox_w, bbox_h, "
-            "detection_confidence, patch_image_path) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (scan_id, patch.patch_index, x, y, w, h,
-             patch.detection_confidence, patch_image_path),
-        )
-        self._conn.commit()
-        return cur.lastrowid  # type: ignore[return-value]
+        with self._lock:
+            cur = self._conn.execute(
+                "INSERT INTO detections "
+                "(scan_id, patch_index, bbox_x, bbox_y, bbox_w, bbox_h, "
+                "detection_confidence, patch_image_path) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (scan_id, patch.patch_index, x, y, w, h,
+                 patch.detection_confidence, patch_image_path),
+            )
+            self._maybe_commit()
+            return cur.lastrowid  # type: ignore[return-value]
 
     def _save_patch_image(self, scan_id: int, patch: "CardPatch") -> Optional[str]:
         """Save a patch image to disk and return its relative path."""
@@ -206,14 +252,15 @@ class DatasetLogger:
             matched_name: The card name that was matched, or ``None``.
             confidence: Confidence score 0–1.
         """
-        self._conn.execute(
-            "INSERT INTO recognition_attempts "
-            "(detection_id, method, raw_text, cleaned_text, matched_name, confidence, attempted_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (detection_id, method, raw_text, cleaned_text,
-             matched_name, confidence, self._now()),
-        )
-        self._conn.commit()
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO recognition_attempts "
+                "(detection_id, method, raw_text, cleaned_text, matched_name, confidence, attempted_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (detection_id, method, raw_text, cleaned_text,
+                 matched_name, confidence, self._now()),
+            )
+            self._maybe_commit()
 
     def log_result(self, detection_id: int, card: "RecognizedCard") -> None:
         """Upsert the final recognition result for a detection.
@@ -223,24 +270,25 @@ class DatasetLogger:
             card: The :class:`~mtg_scanner.models.recognized_card.RecognizedCard` result.
         """
         cd = card.card_data
-        self._conn.execute(
-            "INSERT OR REPLACE INTO results "
-            "(detection_id, card_name, en_name, recognition_method, confidence, "
-            "price_eur, price_usd, set_code, scryfall_uri) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (
-                detection_id,
-                card.card_name,
-                cd.name if cd else card.card_name,
-                card.recognition_method,
-                card.recognition_confidence,
-                cd.price_eur if cd else None,
-                cd.price_usd if cd else None,
-                cd.set_code if cd else None,
-                cd.scryfall_uri if cd else None,
-            ),
-        )
-        self._conn.commit()
+        with self._lock:
+            self._conn.execute(
+                "INSERT OR REPLACE INTO results "
+                "(detection_id, card_name, en_name, recognition_method, confidence, "
+                "price_eur, price_usd, set_code, scryfall_uri) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    detection_id,
+                    card.card_name,
+                    cd.name if cd else card.card_name,
+                    card.recognition_method,
+                    card.recognition_confidence,
+                    cd.price_eur if cd else None,
+                    cd.price_usd if cd else None,
+                    cd.set_code if cd else None,
+                    cd.scryfall_uri if cd else None,
+                ),
+            )
+            self._maybe_commit()
 
     def finish_scan(self, scan_id: int, result: "ScanResult") -> None:
         """Update scan-level aggregate counts after all detections are logged.
@@ -254,13 +302,14 @@ class DatasetLogger:
             for c in result.cards
             if c.card_data and c.card_data.price_eur is not None
         )
-        self._conn.execute(
-            "UPDATE scans SET total_detected=?, total_recognised=?, "
-            "total_unknown=?, total_value_eur=? WHERE id=?",
-            (result.total_detected, result.total_recognized,
-             result.total_unknown, total_value, scan_id),
-        )
-        self._conn.commit()
+        with self._lock:
+            self._conn.execute(
+                "UPDATE scans SET total_detected=?, total_recognised=?, "
+                "total_unknown=?, total_value_eur=? WHERE id=?",
+                (result.total_detected, result.total_recognized,
+                 result.total_unknown, total_value, scan_id),
+            )
+            self._maybe_commit()
 
     # ------------------------------------------------------------------
     # Query helpers
@@ -349,22 +398,23 @@ class DatasetLogger:
             detection_id: The detection whose result should be corrected.
             correct_name: The verified correct card name.
         """
-        self._conn.execute(
-            "UPDATE results SET manually_corrected=1, corrected_name=? "
-            "WHERE detection_id=?",
-            (correct_name, detection_id),
-        )
-        # Insert a row if there is no result yet
-        rows_changed = self._conn.execute(
-            "SELECT changes()"
-        ).fetchone()[0]
-        if rows_changed == 0:
+        with self._lock:
             self._conn.execute(
-                "INSERT INTO results (detection_id, card_name, manually_corrected, corrected_name) "
-                "VALUES (?, ?, 1, ?)",
-                (detection_id, correct_name, correct_name),
+                "UPDATE results SET manually_corrected=1, corrected_name=? "
+                "WHERE detection_id=?",
+                (correct_name, detection_id),
             )
-        self._conn.commit()
+            # Insert a row if there is no result yet
+            rows_changed = self._conn.execute(
+                "SELECT changes()"
+            ).fetchone()[0]
+            if rows_changed == 0:
+                self._conn.execute(
+                    "INSERT INTO results (detection_id, card_name, manually_corrected, corrected_name) "
+                    "VALUES (?, ?, 1, ?)",
+                    (detection_id, correct_name, correct_name),
+                )
+            self._conn.commit()
 
     def export_csv(self, output_path: str) -> int:
         """Export all results to a CSV file.
@@ -442,22 +492,48 @@ class DatasetLogger:
 
     def assign_card(self, detection_id: int, scryfall_id: str, oracle_id: str) -> None:
         """Assign a specific card printing (scryfall_id) to a detection result."""
-        # First try UPDATE on existing row
-        self._conn.execute(
-            """UPDATE results SET scryfall_id = ?, oracle_id = ?, manually_corrected = 1
-               WHERE detection_id = ?""",
-            (scryfall_id, oracle_id, detection_id),
-        )
-        # If no row existed, insert a minimal one
-        if self._conn.execute(
-            "SELECT COUNT(*) FROM results WHERE detection_id = ?", (detection_id,)
-        ).fetchone()[0] == 0:
+        with self._lock:
+            # First try UPDATE on existing row
             self._conn.execute(
-                """INSERT INTO results (detection_id, scryfall_id, oracle_id, manually_corrected)
-                   VALUES (?, ?, ?, 1)""",
-                (detection_id, scryfall_id, oracle_id),
+                """UPDATE results SET scryfall_id = ?, oracle_id = ?, manually_corrected = 1
+                   WHERE detection_id = ?""",
+                (scryfall_id, oracle_id, detection_id),
             )
-        self._conn.commit()
+            # If no row existed, insert a minimal one
+            if self._conn.execute(
+                "SELECT COUNT(*) FROM results WHERE detection_id = ?", (detection_id,)
+            ).fetchone()[0] == 0:
+                self._conn.execute(
+                    """INSERT INTO results (detection_id, scryfall_id, oracle_id, manually_corrected)
+                       VALUES (?, ?, ?, 1)""",
+                    (detection_id, scryfall_id, oracle_id),
+                )
+            self._conn.commit()
+
+    def set_corrected_count(self, scan_id: int, count: int) -> None:
+        """Store the user-verified actual card count for a scan."""
+        with self._lock:
+            self._conn.execute(
+                "UPDATE scans SET corrected_count = ? WHERE id = ?", (count, scan_id)
+            )
+            self._conn.commit()
+
+    def set_detection_approved(self, detection_id: int, approved: Optional[bool]) -> None:
+        """Mark a detection as approved (True), rejected (False), or unchecked (None)."""
+        val = 1 if approved is True else (0 if approved is False else None)
+        with self._lock:
+            self._conn.execute(
+                "UPDATE detections SET detection_approved = ? WHERE id = ?", (val, detection_id)
+            )
+            self._conn.commit()
+
+    def get_recognition_attempts(self, detection_id: int) -> list[dict]:
+        """Return all recognition attempts for a given detection."""
+        rows = self._conn.execute(
+            "SELECT * FROM recognition_attempts WHERE detection_id = ? ORDER BY id",
+            (detection_id,),
+        ).fetchall()
+        return [dict(r) for r in rows]
 
     def close(self) -> None:
         """Close the underlying database connection."""

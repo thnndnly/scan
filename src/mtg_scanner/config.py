@@ -12,7 +12,17 @@ from pathlib import Path
 from typing import Literal, Optional
 
 import yaml
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+# ---------------------------------------------------------------------------
+# Recognition method names — single source of truth
+# ---------------------------------------------------------------------------
+
+RecognitionMethod = Literal["ocr", "hash", "clip", "claude", "llm", "paddle"]
+"""All valid recognition method identifiers.
+
+Used in config validation, pipeline dispatch, and dataset logging.
+"""
 
 
 # ---------------------------------------------------------------------------
@@ -29,19 +39,57 @@ class DetectionConfig(BaseModel):
     aspect_ratio_min: float = Field(0.60, ge=0.0)
     aspect_ratio_max: float = Field(0.85, ge=0.0)
     min_card_area_px: int = Field(5000, ge=0)
+    iou_nms_threshold: float = Field(0.3, ge=0.0, le=1.0)
+    max_card_area_frac: float = Field(0.50, ge=0.0, le=1.0)
     save_debug: bool = False
 
 
 class RecognitionConfig(BaseModel):
     """Settings that control the card-recognition stage."""
 
-    primary_method: Literal["ocr", "hash"] = "ocr"
-    fallback_method: Literal["ocr", "hash", "llm"] = "hash"
+    primary_method: RecognitionMethod = "ocr"
+    fallback_method: RecognitionMethod = "hash"
+    fallback_chain: list[RecognitionMethod] = Field(default_factory=list)
     ocr_confidence_threshold: float = Field(0.70, ge=0.0, le=1.0)
     hash_max_hamming_distance: int = Field(12, ge=0)
     llm_fallback_enabled: bool = False
     ocr_languages: list[str] = Field(default_factory=lambda: ["en", "de"])
     ocr_languages_cjk: list[str] = Field(default_factory=lambda: ["ja"])
+    paddle_confidence_threshold: float = Field(0.70, ge=0.0, le=1.0)
+    hash_db_path: str = "data/card_hashes.db"
+
+    @field_validator("fallback_chain", mode="before")
+    @classmethod
+    def _validate_chain(cls, v: list) -> list:
+        # Pydantic validates each element against RecognitionMethod automatically;
+        # this validator provides a clearer error message for unknown values.
+        valid = {"ocr", "hash", "clip", "claude", "llm", "paddle"}
+        bad = [m for m in v if m not in valid]
+        if bad:
+            raise ValueError(
+                f"Unknown recognition method(s) in fallback_chain: {bad}. "
+                f"Valid values: {sorted(valid)}"
+            )
+        return v
+
+
+class ClaudeConfig(BaseModel):
+    """Settings for the Claude Vision card recogniser."""
+
+    model: str = "claude-sonnet-4-6"
+    names_file: str = "data/card_names.json"
+    fuzzy_cutoff: float = Field(80.0, ge=0.0, le=100.0)
+
+
+class ClipConfig(BaseModel):
+    """Settings for the CLIP embedding card recogniser."""
+
+    db_path: str = "data/clip_embeddings.db"
+    model_name: str = "openai/clip-vit-base-patch32"
+    similarity_threshold: float = Field(0.25, ge=0.0, le=1.0)
+    top_k: int = Field(5, ge=1)
+    device: str = "cpu"
+    use_open_clip: bool = False
 
 
 class ScryfallConfig(BaseModel):
@@ -50,6 +98,7 @@ class ScryfallConfig(BaseModel):
     cache_ttl_hours: int = Field(24, ge=0)
     rate_limit_ms: int = Field(110, ge=0)
     cache_db_path: str = "data/scryfall_cache.db"
+    prefer_local: bool = True  # Use local card_catalog.db before hitting the API
 
 
 class OutputConfig(BaseModel):
@@ -59,6 +108,9 @@ class OutputConfig(BaseModel):
     output_dir: str = "./output"
     save_card_patches: bool = False
     low_confidence_threshold: float = Field(0.60, ge=0.0, le=1.0)
+    recognition_timeout_seconds: int = Field(
+        0, ge=0, description="Max seconds per card recognition (0 = disabled)"
+    )
 
 
 class DatasetConfig(BaseModel):
@@ -89,6 +141,18 @@ class CatalogConfig(BaseModel):
     bulk_type: str = "default_cards"
 
 
+class CollectionConfig(BaseModel):
+    """Settings for the card collection manager."""
+
+    db_path: str = "data/collection.db"
+
+
+class WishlistConfig(BaseModel):
+    """Settings for the wish-list / trade-list manager."""
+
+    db_path: str = "data/wishlist.db"
+
+
 class AppConfig(BaseModel):
     """Top-level application configuration."""
 
@@ -99,6 +163,10 @@ class AppConfig(BaseModel):
     dataset: DatasetConfig = Field(default_factory=DatasetConfig)
     archive: ArchiveConfig = Field(default_factory=ArchiveConfig)
     catalog: CatalogConfig = Field(default_factory=CatalogConfig)
+    collection: CollectionConfig = Field(default_factory=CollectionConfig)
+    wishlist: WishlistConfig = Field(default_factory=WishlistConfig)
+    claude: ClaudeConfig = Field(default_factory=ClaudeConfig)
+    clip: ClipConfig = Field(default_factory=ClipConfig)
 
 
 # ---------------------------------------------------------------------------

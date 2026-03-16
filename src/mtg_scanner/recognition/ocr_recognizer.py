@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import re
+import threading
 from typing import Optional
 
 import cv2
@@ -17,6 +18,17 @@ from mtg_scanner.utils.image_utils import crop_region
 
 logger = logging.getLogger(__name__)
 
+# ---------------------------------------------------------------------------
+# Card layout constants
+# ---------------------------------------------------------------------------
+
+# Title bar occupies roughly the top 13 % of a standard MTG card frame.
+# Used to crop the title region for OCR.
+_TITLE_STRIP_HEIGHT_FRAC: float = 0.13
+
+# Exclude the right portion of the title strip (mana cost symbols).
+# Mana cost occupies roughly the rightmost 30 % of the title bar.
+_TITLE_STRIP_X_END_FRAC: float = 0.70
 
 # ---------------------------------------------------------------------------
 # Character cleaning helpers
@@ -92,41 +104,48 @@ class OCRRecognizer(BaseRecognizer):
         self._reader = None      # primary (Latin) reader — lazy
         self._reader_cjk = None  # CJK reader — lazy, only when needed
         self._card_names: list[str] = []
+        self._reader_lock = threading.Lock()
 
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
 
     def _get_reader(self):
-        """Lazily initialise the primary (Latin) EasyOCR reader."""
+        """Lazily initialise the primary (Latin) EasyOCR reader (thread-safe)."""
         if self._reader is not None:
             return self._reader
-        try:
-            import easyocr  # type: ignore
-        except ImportError as exc:
-            raise ImportError(
-                "The 'easyocr' package is required for OCR recognition.\n"
-                "Install it with:  pip install easyocr"
-            ) from exc
-        logger.info("Initialising EasyOCR reader for languages: %s", self._languages)
-        self._reader = easyocr.Reader(self._languages, verbose=False)
+        with self._reader_lock:
+            if self._reader is not None:  # double-checked locking
+                return self._reader
+            try:
+                import easyocr  # type: ignore
+            except ImportError as exc:
+                raise ImportError(
+                    "The 'easyocr' package is required for OCR recognition.\n"
+                    "Install it with:  pip install easyocr"
+                ) from exc
+            logger.info("Initialising EasyOCR reader for languages: %s", self._languages)
+            self._reader = easyocr.Reader(self._languages, verbose=False)
         return self._reader
 
     def _get_reader_cjk(self):
-        """Lazily initialise the CJK (e.g. Japanese) EasyOCR reader."""
+        """Lazily initialise the CJK (e.g. Japanese) EasyOCR reader (thread-safe)."""
         if self._reader_cjk is not None:
             return self._reader_cjk
         if not self._languages_cjk:
             return None
-        try:
-            import easyocr  # type: ignore
-        except ImportError as exc:
-            raise ImportError(
-                "The 'easyocr' package is required for OCR recognition.\n"
-                "Install it with:  pip install easyocr"
-            ) from exc
-        logger.info("Initialising EasyOCR CJK reader for languages: %s", self._languages_cjk)
-        self._reader_cjk = easyocr.Reader(self._languages_cjk, verbose=False)
+        with self._reader_lock:
+            if self._reader_cjk is not None:  # double-checked locking
+                return self._reader_cjk
+            try:
+                import easyocr  # type: ignore
+            except ImportError as exc:
+                raise ImportError(
+                    "The 'easyocr' package is required for OCR recognition.\n"
+                    "Install it with:  pip install easyocr"
+                ) from exc
+            logger.info("Initialising EasyOCR CJK reader for languages: %s", self._languages_cjk)
+            self._reader_cjk = easyocr.Reader(self._languages_cjk, verbose=False)
         return self._reader_cjk
 
     def _get_card_names(self) -> list[str]:
@@ -141,6 +160,9 @@ class OCRRecognizer(BaseRecognizer):
     def _extract_title_region(self, patch_image: np.ndarray) -> np.ndarray:
         """Crop the title bar from the top of the card (top 13 % of height).
 
+        The rightmost 30 % of the strip (mana cost symbols) is excluded to
+        prevent OCR from reading mana-cost digits instead of the card name.
+
         If the resulting strip is very small (common when many cards are
         photographed at once), upscale it so EasyOCR has enough pixels to work
         with.
@@ -151,7 +173,9 @@ class OCRRecognizer(BaseRecognizer):
         Returns:
             Cropped (and possibly upscaled) title region.
         """
-        region = crop_region(patch_image, y_start_frac=0.0, y_end_frac=0.13)
+        h_full, w_full = patch_image.shape[:2]
+        x_end = int(w_full * _TITLE_STRIP_X_END_FRAC)
+        region = patch_image[0:int(h_full * _TITLE_STRIP_HEIGHT_FRAC), 0:x_end]
         h = region.shape[0]
         if h < self._MIN_TITLE_HEIGHT_PX and h > 0:
             scale = self._MIN_TITLE_HEIGHT_PX / h
@@ -159,6 +183,65 @@ class OCRRecognizer(BaseRecognizer):
             region = cv2.resize(region, (new_w, self._MIN_TITLE_HEIGHT_PX),
                                 interpolation=cv2.INTER_CUBIC)
         return region
+
+    def _preprocess_variants(self, region: np.ndarray) -> list[np.ndarray]:
+        """Return a list of preprocessing variants of the title region.
+
+        Tries the raw image first, then an inverted-grayscale version.
+        Inversion helps when the card title uses light text on a dark
+        card-frame colour (e.g. red, black, or dark blue borders).
+
+        Args:
+            region: BGR title strip image.
+
+        Returns:
+            List of BGR images to try in order.
+        """
+        variants: list[np.ndarray] = [region]
+        try:
+            gray = cv2.cvtColor(region, cv2.COLOR_BGR2GRAY)
+            inverted = cv2.cvtColor(cv2.bitwise_not(gray), cv2.COLOR_GRAY2BGR)
+            variants.append(inverted)
+        except Exception:
+            pass
+        return variants
+
+    def _run_cjk_ocr(self, patch_image: np.ndarray, title_region: np.ndarray) -> str:
+        """Run CJK OCR on the title strip, falling back to full patch if empty.
+
+        Args:
+            patch_image: Full card patch image (BGR).
+            title_region: Pre-extracted title strip image (BGR).
+
+        Returns:
+            Concatenated OCR text, or empty string if nothing found.
+        """
+        cjk_reader = self._get_reader_cjk()
+        if not cjk_reader:
+            return ""
+
+        # Try title strip first
+        cjk_text = ""
+        try:
+            cjk_text = self._run_ocr(title_region, reader=cjk_reader)
+        except Exception as exc:
+            logger.warning("CJK OCR on title failed: %s", exc)
+
+        # If title strip yields nothing, try full patch upscaled to at least 400px height
+        if not cjk_text.strip():
+            try:
+                ph = patch_image.shape[0]
+                if ph < 400:
+                    scale = 400 / ph
+                    pw = max(1, int(patch_image.shape[1] * scale))
+                    full_up = cv2.resize(patch_image, (pw, 400), interpolation=cv2.INTER_CUBIC)
+                else:
+                    full_up = patch_image
+                cjk_text = self._run_ocr(full_up, reader=cjk_reader)
+            except Exception as exc:
+                logger.warning("CJK OCR on full patch failed: %s", exc)
+
+        return cjk_text
 
     def _run_ocr(self, region: np.ndarray, reader=None) -> str:
         """Run EasyOCR on *region* and return aggregated text.
@@ -202,86 +285,56 @@ class OCRRecognizer(BaseRecognizer):
         if title_region.size == 0:
             return None, 0.0
 
-        try:
-            raw_text = self._run_ocr(title_region)
-        except Exception as exc:
-            logger.warning("OCR failed: %s", exc)
-            return None, 0.0
-
-        if not raw_text.strip():
-            # Primary OCR produced nothing — try CJK reader on title strip
-            cjk_reader = self._get_reader_cjk()
-            if cjk_reader:
-                try:
-                    raw_text = self._run_ocr(title_region, reader=cjk_reader)
-                except Exception as exc:
-                    logger.warning("CJK OCR on title failed: %s", exc)
-            # Still nothing — try CJK on full patch upscaled to at least 400px height
-            if not raw_text.strip() and cjk_reader:
-                try:
-                    ph = patch.image.shape[0]
-                    if ph < 400:
-                        scale = 400 / ph
-                        pw = max(1, int(patch.image.shape[1] * scale))
-                        full_up = cv2.resize(patch.image, (pw, 400), interpolation=cv2.INTER_CUBIC)
-                    else:
-                        full_up = patch.image
-                    raw_text = self._run_ocr(full_up, reader=cjk_reader)
-                except Exception as exc:
-                    logger.warning("CJK OCR on full patch failed: %s", exc)
-            if not raw_text.strip():
-                logger.debug("OCR produced no text for patch %d", patch.patch_index)
-                return None, 0.0
-
-        cleaned = _clean_ocr_text(raw_text)
-        logger.debug("OCR raw=%r  cleaned=%r", raw_text, cleaned)
-
         names = self._get_card_names()
         cutoff = self._confidence_threshold * 100.0
 
-        # Multilingual match: EN/DE names first, then localized mappings
-        card_name, confidence = best_match_multilingual(
-            cleaned, names, self._MAPPING_PATHS, score_cutoff=cutoff
-        )
+        best_card_name: Optional[str] = None
+        best_confidence: float = 0.0
+        best_raw: str = ""
 
-        if card_name is None or confidence < self._confidence_threshold:
-            # Last resort: try CJK OCR (title strip, then full patch upscaled)
-            cjk_reader = self._get_reader_cjk()
-            if cjk_reader:
-                cjk_text = ""
-                # Try title strip first
-                try:
-                    cjk_text = self._run_ocr(title_region, reader=cjk_reader)
-                except Exception as exc:
-                    logger.warning("CJK OCR on title failed: %s", exc)
-                # If title strip yields nothing, try full patch upscaled
-                if not cjk_text.strip():
-                    try:
-                        ph = patch.image.shape[0]
-                        if ph < 400:
-                            scale = 400 / ph
-                            pw = max(1, int(patch.image.shape[1] * scale))
-                            full_up = cv2.resize(patch.image, (pw, 400),
-                                                 interpolation=cv2.INTER_CUBIC)
-                        else:
-                            full_up = patch.image
-                        cjk_text = self._run_ocr(full_up, reader=cjk_reader)
-                    except Exception as exc:
-                        logger.warning("CJK OCR on full patch failed: %s", exc)
-                if cjk_text.strip():
-                    cjk_cleaned = _clean_ocr_text(cjk_text)
-                    logger.debug("CJK OCR raw=%r  cleaned=%r", cjk_text, cjk_cleaned)
-                    card_name, confidence = best_match_multilingual(
-                        cjk_cleaned, names, self._MAPPING_PATHS, score_cutoff=cutoff
-                    )
+        # Try raw and inverted-grayscale variants; keep the best fuzzy match.
+        for variant in self._preprocess_variants(title_region):
+            try:
+                raw_text = self._run_ocr(variant)
+            except Exception as exc:
+                logger.warning("OCR failed: %s", exc)
+                continue
 
-        if card_name is None or confidence < self._confidence_threshold:
-            logger.debug(
-                "OCR: no match above threshold for %r (best=%.2f)", cleaned, confidence
+            if not raw_text.strip():
+                continue
+
+            cleaned = _clean_ocr_text(raw_text)
+            logger.debug("OCR raw=%r  cleaned=%r", raw_text, cleaned)
+
+            card_name, confidence = best_match_multilingual(
+                cleaned, names, self._MAPPING_PATHS, score_cutoff=cutoff
             )
-            return None, confidence
+            if card_name is not None and confidence > best_confidence:
+                best_card_name = card_name
+                best_confidence = confidence
+                best_raw = raw_text
+
+        # CJK fallback — only when all Latin variants failed to find a match
+        if best_card_name is None:
+            cjk_text = self._run_cjk_ocr(patch.image, title_region)
+            if cjk_text.strip():
+                cjk_cleaned = _clean_ocr_text(cjk_text)
+                logger.debug("CJK OCR raw=%r  cleaned=%r", cjk_text, cjk_cleaned)
+                card_name, confidence = best_match_multilingual(
+                    cjk_cleaned, names, self._MAPPING_PATHS, score_cutoff=cutoff
+                )
+                if card_name is not None:
+                    best_card_name = card_name
+                    best_confidence = confidence
+                    best_raw = cjk_text
+
+        if best_card_name is None:
+            logger.debug(
+                "OCR: no match above threshold (best=%.2f)", best_confidence
+            )
+            return None, best_confidence
 
         logger.info(
-            "OCR: matched %r → %r (confidence=%.2f)", cleaned, card_name, confidence
+            "OCR: matched %r → %r (confidence=%.2f)", best_raw, best_card_name, best_confidence
         )
-        return card_name, confidence
+        return best_card_name, best_confidence
